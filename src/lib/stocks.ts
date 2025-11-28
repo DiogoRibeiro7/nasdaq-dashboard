@@ -1,9 +1,46 @@
+/**
+ * Stock ticker definitions and constants.
+ *
+ * Contains the list of NASDAQ stocks available in this dashboard.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Represents a stock ticker with its symbol and company name.
+ */
 export type StockTicker = {
+  /** Stock ticker symbol (e.g., "AAPL") */
   symbol: string;
+  /** Full company name (e.g., "Apple Inc.") */
   name: string;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * S&P 500 Index ETF - used as a market benchmark.
+ * Always included in correlation matrix for comparison.
+ */
+export const SP500_INDEX: StockTicker = {
+  symbol: "SPY",
+  name: "S&P 500 ETF",
+};
+
+/**
+ * List of NASDAQ stocks available in this dashboard.
+ *
+ * This list is used for:
+ * - Populating the stock selector dropdown
+ * - Validating API requests (only these symbols are allowed)
+ * - Multi-stock comparison feature
+ */
 export const NASDAQ_STOCKS: StockTicker[] = [
+  SP500_INDEX,
   { symbol: "AAPL", name: "Apple Inc." },
   { symbol: "MSFT", name: "Microsoft Corporation" },
   { symbol: "GOOGL", name: "Alphabet Inc. (Class A)" },
@@ -23,5 +60,12 @@ export const NASDAQ_STOCKS: StockTicker[] = [
   { symbol: "TXN", name: "Texas Instruments Incorporated" },
   { symbol: "PYPL", name: "PayPal Holdings, Inc." },
   { symbol: "INTU", name: "Intuit Inc." },
-  { symbol: "AMAT", name: "Applied Materials, Inc." }
-];
+  { symbol: "AMAT", name: "Applied Materials, Inc." },
+] as const;
+
+/**
+ * Set of valid stock symbols for O(1) lookup.
+ */
+export const VALID_SYMBOLS = new Set(
+  NASDAQ_STOCKS.map((stock) => stock.symbol),
+);
