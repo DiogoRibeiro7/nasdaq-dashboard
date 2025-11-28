@@ -52,6 +52,18 @@ function formatPrice(value: number): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Determines the color class for a return value.
+ */
+function getReturnColor(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "text-neutral-200";
+  }
+  if (value > 0) return "text-green-400";
+  if (value < 0) return "text-red-400";
+  return "text-neutral-200";
+}
+
+/**
  * Grid of cards displaying key stock statistics.
  *
  * Shows last closing price and various risk/return metrics.
@@ -59,13 +71,27 @@ function formatPrice(value: number): string {
  */
 export function StatsCards({ stats }: StatsCardsProps): JSX.Element {
   return (
-    <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
-      <StatCard label="Last Close" value={formatPrice(stats.lastClose)} />
-      <StatCard label="1M Return" value={formatPct(stats.oneMonthReturn)} />
-      <StatCard label="3M Return" value={formatPct(stats.threeMonthReturn)} />
+    <div className="grid flex-1 grid-cols-2 gap-3 lg:grid-cols-1">
       <StatCard
-        label="Annualised Volatility"
+        label="Last Close"
+        value={formatPrice(stats.lastClose)}
+        valueClass="text-neutral-100"
+      />
+      <StatCard
+        label="1M Return"
+        value={formatPct(stats.oneMonthReturn)}
+        valueClass={getReturnColor(stats.oneMonthReturn)}
+      />
+      <StatCard
+        label="3M Return"
+        value={formatPct(stats.threeMonthReturn)}
+        valueClass={getReturnColor(stats.threeMonthReturn)}
+      />
+      <StatCard
+        label="Volatility"
         value={formatPct(stats.annualizedVolatility)}
+        valueClass="text-amber-400"
+        subtitle="Annualized"
       />
     </div>
   );
@@ -81,16 +107,30 @@ export function StatsCards({ stats }: StatsCardsProps): JSX.Element {
 type StatCardProps = {
   label: string;
   value: string;
+  valueClass?: string;
+  subtitle?: string;
 };
 
 /**
  * Individual statistic card with label and value.
  */
-function StatCard({ label, value }: StatCardProps): JSX.Element {
+function StatCard({
+  label,
+  value,
+  valueClass = "text-neutral-100",
+  subtitle,
+}: StatCardProps): JSX.Element {
   return (
-    <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-3">
-      <div className="text-xs text-neutral-400">{label}</div>
-      <div className="text-lg font-semibold">{value}</div>
+    <div className="rounded-xl border border-neutral-700/50 bg-neutral-800/30 p-3 transition-colors hover:border-neutral-600/50 hover:bg-neutral-800/50">
+      <div className="flex items-baseline justify-between">
+        <span className="text-xs font-medium text-neutral-400">{label}</span>
+        {subtitle && (
+          <span className="text-[10px] text-neutral-500">{subtitle}</span>
+        )}
+      </div>
+      <div className={`mt-1 text-xl font-semibold tabular-nums ${valueClass}`}>
+        {value}
+      </div>
     </div>
   );
 }

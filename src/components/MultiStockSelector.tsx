@@ -73,35 +73,40 @@ export function MultiStockSelector({
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-sm font-medium">Compare tickers</span>
-        <span className="text-xs text-neutral-400">
-          {selectedSymbols.length} / {maxSelected} selected
+        <span className="text-sm font-medium text-neutral-200">Compare tickers</span>
+        <span className="rounded-full bg-neutral-800 px-2 py-0.5 text-xs text-neutral-400">
+          {selectedSymbols.length} / {maxSelected}
         </span>
       </div>
-      <div className="max-h-40 overflow-y-auto rounded-lg border border-neutral-800 bg-neutral-900 p-2 text-xs">
-        <ul className="space-y-1" role="listbox" aria-label="Stock selection">
+      <div className="max-h-40 overflow-y-auto rounded-xl border border-neutral-700/50 bg-neutral-900/80 p-1.5 text-xs scrollbar-thin">
+        <ul className="space-y-0.5" role="listbox" aria-label="Stock selection">
           {NASDAQ_STOCKS.map((stock) => {
             const isSelected = selectedSymbols.includes(stock.symbol);
             const isAtLimit = selectedSymbols.length >= maxSelected;
             const isEffectivelyDisabled = disabled || (!isSelected && isAtLimit);
 
             return (
-              <li
-                key={stock.symbol}
-                className="flex items-center justify-between gap-2"
-              >
-                <label className="flex cursor-pointer items-center gap-2">
+              <li key={stock.symbol}>
+                <label
+                  className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 transition-colors ${
+                    isSelected
+                      ? "bg-neutral-700/50 text-neutral-100"
+                      : isEffectivelyDisabled
+                        ? "cursor-not-allowed text-neutral-600"
+                        : "text-neutral-300 hover:bg-neutral-800/80 hover:text-neutral-100"
+                  }`}
+                >
                   <input
                     type="checkbox"
-                    className="h-3 w-3 rounded border-neutral-600 bg-neutral-900"
+                    className="h-3.5 w-3.5 rounded border-neutral-600 bg-neutral-800 text-neutral-100 accent-neutral-100 focus:ring-1 focus:ring-neutral-500 focus:ring-offset-0"
                     checked={isSelected}
                     onChange={() => handleToggle(stock.symbol)}
                     disabled={isEffectivelyDisabled}
                     aria-label={`${stock.symbol} - ${stock.name}`}
                   />
-                  <span>
+                  <span className="flex-1 truncate">
                     <span className="font-semibold">{stock.symbol}</span>
-                    <span className="ml-1 text-neutral-400">{stock.name}</span>
+                    <span className="ml-1.5 text-neutral-500">{stock.name}</span>
                   </span>
                 </label>
               </li>

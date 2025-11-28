@@ -5,11 +5,34 @@ import { useEffect, useMemo, useState } from "react";
 import { StockSelector } from "@/components/StockSelector";
 import { StockChart } from "@/components/StockChart";
 import { StatsCards } from "@/components/StatsCards";
-import { computeStats, computeCorrelationMatrix } from "@/lib/stats";
-import type { CorrelationMatrix } from "@/lib/stats";
+import {
+  computeStats,
+  computeCorrelationMatrix,
+  computeRollingVolatility,
+  computeRollingReturn,
+  computeDrawdown,
+  getDailyLogReturns,
+  computeReturnDistribution,
+  computeHigherMoments,
+  computeSharpeRatio,
+} from "@/lib/stats";
+import type {
+  CorrelationMatrix,
+  RollingVolatilityPoint,
+  RollingReturnPoint,
+  DrawdownPoint,
+  DailyLogReturn,
+  ReturnDistributionBin,
+  HigherMoments,
+} from "@/lib/stats";
 import { MultiStockSelector } from "@/components/MultiStockSelector";
 import { MultiStockChart } from "@/components/MultiStockChart";
 import { CorrelationHeatmap } from "@/components/CorrelationHeatmap";
+import { RollingVolChart } from "@/components/RollingVolChart";
+import { RollingReturnChart } from "@/components/RollingReturnChart";
+import { DrawdownChart } from "@/components/DrawdownChart";
+import { ReturnHistogram } from "@/components/ReturnHistogram";
+import { RiskMetricsPanel } from "@/components/RiskMetricsPanel";
 import type {
   ChartPoint,
   FetchState,
@@ -20,6 +43,7 @@ import type {
 } from "@/lib/types";
 import { TIME_RANGE_DAYS } from "@/lib/types";
 import { SP500_INDEX } from "@/lib/stocks";
+import { useDashboardSearchParams } from "@/lib/useDashboardSearchParams";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper Functions
@@ -76,11 +100,15 @@ async function extractErrorMessage(
  */
 export function StockDashboard(): JSX.Element {
   // ───────────────────────────────────────────────────────────────────────────
-  // State
+  // URL-driven State
   // ───────────────────────────────────────────────────────────────────────────
 
-  const [symbol, setSymbol] = useState<string>("AAPL");
-  const [range, setRange] = useState<TimeRange>("3M");
+  // Symbol and range are persisted in the URL query string
+  const { symbol, range, setSymbol, setRange } = useDashboardSearchParams();
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Local State
+  // ───────────────────────────────────────────────────────────────────────────
 
   const [singleState, setSingleState] = useState<FetchState<StockApiResponse>>({
     status: "idle",
@@ -95,6 +123,12 @@ export function StockDashboard(): JSX.Element {
   const [multiState, setMultiState] = useState<
     FetchState<Record<string, StockApiResponse>>
   >({ status: "idle" });
+
+  // Advanced analytics state
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
+  const [analyticsTab, setAnalyticsTab] = useState<
+    "vol21" | "vol63" | "ret21" | "drawdown"
+  >("vol21");
 
   // ───────────────────────────────────────────────────────────────────────────
   // Data Fetching
@@ -201,29 +235,71 @@ export function StockDashboard(): JSX.Element {
   // Derived Data
   // ───────────────────────────────────────────────────────────────────────────
 
-  const { chartData: singleChartData, stats } = useMemo(() => {
+  const { chartData: singleChartData, stats, rangeSeries } = useMemo(() => {
     if (singleState.status !== "success") {
       return {
         chartData: [] as ChartPoint[],
         stats: null as ReturnType<typeof computeStats> | null,
+        rangeSeries: [] as StockTimeSeriesPoint[],
       };
     }
 
-    const rangeSeries = filterByRange(singleState.data.series, range);
+    const filtered = filterByRange(singleState.data.series, range);
 
-    const chartPoints: ChartPoint[] = rangeSeries.map((point) => ({
+    const chartPoints: ChartPoint[] = filtered.map((point) => ({
       date: point.date,
       close: point.close,
     }));
 
     const statsResult =
-      rangeSeries.length > 0 ? computeStats(rangeSeries) : null;
+      filtered.length > 0 ? computeStats(filtered) : null;
 
     return {
       chartData: chartPoints,
       stats: statsResult,
+      rangeSeries: filtered,
     };
   }, [singleState, range]);
+
+  // Compute advanced analytics (rolling volatility, returns, drawdown)
+  const advancedAnalytics = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return {
+        rollingVol21: [] as RollingVolatilityPoint[],
+        rollingVol63: [] as RollingVolatilityPoint[],
+        rollingRet21: [] as RollingReturnPoint[],
+        drawdown: [] as DrawdownPoint[],
+      };
+    }
+
+    return {
+      rollingVol21: computeRollingVolatility(rangeSeries, 21),
+      rollingVol63: computeRollingVolatility(rangeSeries, 63),
+      rollingRet21: computeRollingReturn(rangeSeries, 21),
+      drawdown: computeDrawdown(rangeSeries),
+    };
+  }, [rangeSeries]);
+
+  // Compute return distribution and risk metrics
+  const returnDistribution = useMemo(() => {
+    const dailyReturns = getDailyLogReturns(rangeSeries);
+
+    if (dailyReturns.length === 0) {
+      return {
+        dailyReturns: [] as DailyLogReturn[],
+        histogram: [] as ReturnDistributionBin[],
+        moments: { mean: NaN, std: NaN, skewness: NaN, kurtosis: NaN } as HigherMoments,
+        sharpeRatio: null as number | null,
+      };
+    }
+
+    return {
+      dailyReturns,
+      histogram: computeReturnDistribution(dailyReturns, 35),
+      moments: computeHigherMoments(dailyReturns),
+      sharpeRatio: computeSharpeRatio(dailyReturns),
+    };
+  }, [rangeSeries]);
 
   const { multiChartData, multiSymbols } = useMemo(() => {
     if (multiState.status !== "success") {
@@ -347,14 +423,16 @@ export function StockDashboard(): JSX.Element {
   const timeRangeOptions: TimeRange[] = ["1M", "3M", "6M", "1Y", "MAX"];
 
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       {/* Header with controls */}
-      <header className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+      <header className="flex flex-col justify-between gap-4 lg:flex-row lg:items-center">
         <div>
-          <h1 className="text-2xl font-semibold">Nasdaq Stock Dashboard</h1>
-          <p className="text-sm text-neutral-400">
-            Track daily prices, basic risk/return metrics, and compare relative
-            performance across selected tickers.
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Nasdaq Stock Dashboard
+          </h1>
+          <p className="mt-1 text-sm text-neutral-400">
+            Track daily prices, risk/return metrics, and compare relative
+            performance.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -364,17 +442,17 @@ export function StockDashboard(): JSX.Element {
             disabled={isSingleLoading}
           />
           <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">Range</span>
-            <div className="flex gap-1 rounded-lg border border-neutral-700 bg-neutral-900 p-1 text-xs">
+            <span className="text-xs font-medium text-neutral-400">Range</span>
+            <div className="flex rounded-lg border border-neutral-700 bg-neutral-900/50 p-0.5">
               {timeRangeOptions.map((r) => (
                 <button
                   key={r}
                   type="button"
                   onClick={() => setRange(r)}
-                  className={`rounded-md px-2 py-1 ${
+                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
                     r === range
-                      ? "bg-neutral-100 text-neutral-900"
-                      : "text-neutral-300 hover:bg-neutral-800"
+                      ? "bg-neutral-100 text-neutral-900 shadow-sm"
+                      : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
                   }`}
                 >
                   {r}
@@ -387,115 +465,292 @@ export function StockDashboard(): JSX.Element {
 
       {/* Loading indicator for single stock */}
       {isSingleLoading && (
-        <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-300">
+        <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-4 text-sm text-neutral-300">
           Loading data for <span className="font-semibold">{symbol}</span>…
         </div>
       )}
 
       {/* Error message for single stock */}
       {isSingleError && singleState.status === "error" && (
-        <div className="rounded-xl border border-red-800 bg-red-950 p-4 text-sm text-red-100">
+        <div className="rounded-2xl border border-red-900/50 bg-red-950/50 p-4 text-sm text-red-100">
           <p className="font-semibold">Error loading data</p>
-          <p className="mt-1">{singleState.error}</p>
-          <p className="mt-2 text-xs text-red-200">
+          <p className="mt-1 text-red-200">{singleState.error}</p>
+          <p className="mt-2 text-xs text-red-300">
             This can happen if the API rate limit is hit or the symbol is
             temporarily unavailable. Try again in a minute.
           </p>
         </div>
       )}
 
-      {/* Price chart section */}
-      <section className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
-        <h2 className="mb-2 text-lg font-medium">
-          {singleState.status === "success"
-            ? `${singleState.data.symbol} — Price History`
-            : "Price History"}
-        </h2>
-        {singleChartData.length > 0 ? (
-          <StockChart data={singleChartData} />
-        ) : (
-          <div className="flex h-40 items-center justify-center text-sm text-neutral-400">
-            {isSingleLoading
-              ? "Fetching time series…"
-              : "No data available for this selection."}
-          </div>
-        )}
-      </section>
+      {/* Price chart and stats - side by side on larger screens */}
+      <div className="grid gap-6 lg:grid-cols-3">
+        {/* Price chart section - takes 2/3 on large screens */}
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-2">
+          <h2 className="mb-3 text-base font-medium text-neutral-200">
+            {singleState.status === "success"
+              ? `${singleState.data.symbol} — Price History`
+              : "Price History"}
+          </h2>
+          {singleChartData.length > 0 ? (
+            <StockChart data={singleChartData} />
+          ) : (
+            <div className="flex h-72 items-center justify-center text-sm text-neutral-500">
+              {isSingleLoading
+                ? "Fetching time series…"
+                : "No data available for this selection."}
+            </div>
+          )}
+        </section>
 
-      {/* Statistics section */}
-      <section>
-        <h2 className="mb-2 text-lg font-medium">Risk and Return Metrics</h2>
-        {stats ? (
-          <StatsCards stats={stats} />
-        ) : (
-          <div className="rounded-xl border border-neutral-800 bg-neutral-900 p-4 text-sm text-neutral-400">
-            Not enough data to compute statistics for this selection.
-          </div>
-        )}
-      </section>
+        {/* Statistics section - takes 1/3 on large screens */}
+        <section className="flex flex-col rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <h2 className="mb-3 text-base font-medium text-neutral-200">
+            Risk &amp; Return
+          </h2>
+          {stats ? (
+            <StatsCards stats={stats} />
+          ) : (
+            <div className="flex flex-1 items-center justify-center text-sm text-neutral-500">
+              Not enough data to compute statistics.
+            </div>
+          )}
+        </section>
+      </div>
 
-      {/* Multi-stock comparison section */}
-      <section className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
-        <div className="mb-4 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-          <div>
-            <h2 className="text-lg font-medium">Multi-stock comparison</h2>
-            <p className="text-xs text-neutral-400">
-              Lines are normalised to 1 at the start of the selected range to
-              show relative performance.
+      {/* Return Distribution & Risk Profile */}
+      <div className="grid gap-6 lg:grid-cols-5">
+        {/* Histogram - takes 3/5 on large screens */}
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-3">
+          <div className="mb-3">
+            <h2 className="text-base font-medium text-neutral-200">
+              Return Distribution
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Histogram of daily log returns over selected range.
             </p>
           </div>
-          <div className="w-full max-w-xs">
-            <MultiStockSelector
-              selectedSymbols={multiSelectedSymbols}
-              onChange={setMultiSelectedSymbols}
-              maxSelected={4}
-              disabled={isMultiLoading}
+          {isSingleLoading ? (
+            <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+              Loading return data…
+            </div>
+          ) : (
+            <ReturnHistogram data={returnDistribution.histogram} />
+          )}
+        </section>
+
+        {/* Risk Metrics - takes 2/5 on large screens */}
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-2">
+          <div className="mb-3">
+            <h2 className="text-base font-medium text-neutral-200">
+              Risk Profile
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Distribution moments and risk-adjusted metrics.
+            </p>
+          </div>
+          {isSingleLoading ? (
+            <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+              Loading risk metrics…
+            </div>
+          ) : returnDistribution.dailyReturns.length > 0 ? (
+            <RiskMetricsPanel
+              moments={returnDistribution.moments}
+              sharpeRatio={returnDistribution.sharpeRatio}
             />
-          </div>
-        </div>
+          ) : (
+            <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+              Insufficient data for risk metrics.
+            </div>
+          )}
+        </section>
+      </div>
 
-        {isMultiLoading && (
-          <div className="mb-3 rounded-lg border border-neutral-700 bg-neutral-950 p-3 text-xs text-neutral-300">
-            Loading comparison data for selected tickers…
+      {/* Advanced Time-Series Analytics - Collapsible Section */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50">
+        <button
+          type="button"
+          onClick={() => setAnalyticsOpen(!analyticsOpen)}
+          className="flex w-full items-center justify-between p-5 text-left transition-colors hover:bg-neutral-800/30"
+        >
+          <div>
+            <h2 className="text-base font-medium text-neutral-200">
+              Advanced Time-Series Analytics
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Rolling volatility, returns, and drawdown analysis.
+            </p>
+          </div>
+          <span
+            className={`text-neutral-400 transition-transform ${
+              analyticsOpen ? "rotate-180" : ""
+            }`}
+          >
+            <svg
+              className="h-5 w-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M19 9l-7 7-7-7"
+              />
+            </svg>
+          </span>
+        </button>
+
+        {analyticsOpen && (
+          <div className="border-t border-neutral-800 p-5 pt-4">
+            {/* Tab Navigation */}
+            <div className="mb-4 flex flex-wrap gap-2">
+              {(
+                [
+                  { key: "vol21", label: "21d Volatility" },
+                  { key: "vol63", label: "63d Volatility" },
+                  { key: "ret21", label: "21d Returns" },
+                  { key: "drawdown", label: "Drawdown" },
+                ] as const
+              ).map(({ key, label }) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setAnalyticsTab(key)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
+                    analyticsTab === key
+                      ? "bg-neutral-700 text-neutral-100"
+                      : "bg-neutral-800/50 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Chart Content */}
+            {isSingleLoading ? (
+              <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+                Loading analytics data…
+              </div>
+            ) : (
+              <>
+                {analyticsTab === "vol21" && (
+                  <div>
+                    <p className="mb-2 text-xs text-neutral-500">
+                      21-day rolling annualized volatility (std dev of log returns × √252).
+                    </p>
+                    <RollingVolChart
+                      data={advancedAnalytics.rollingVol21}
+                      windowDays={21}
+                    />
+                  </div>
+                )}
+                {analyticsTab === "vol63" && (
+                  <div>
+                    <p className="mb-2 text-xs text-neutral-500">
+                      63-day rolling annualized volatility (approx. 3 months).
+                    </p>
+                    <RollingVolChart
+                      data={advancedAnalytics.rollingVol63}
+                      windowDays={63}
+                    />
+                  </div>
+                )}
+                {analyticsTab === "ret21" && (
+                  <div>
+                    <p className="mb-2 text-xs text-neutral-500">
+                      21-day trailing simple returns (current price vs. 21 days ago).
+                    </p>
+                    <RollingReturnChart
+                      data={advancedAnalytics.rollingRet21}
+                      windowDays={21}
+                    />
+                  </div>
+                )}
+                {analyticsTab === "drawdown" && (
+                  <div>
+                    <p className="mb-2 text-xs text-neutral-500">
+                      Drawdown from running peak (0% = new high, negative = below peak).
+                    </p>
+                    <DrawdownChart data={advancedAnalytics.drawdown} />
+                  </div>
+                )}
+              </>
+            )}
           </div>
         )}
-
-        {isMultiError && multiState.status === "error" && (
-          <div className="mb-3 rounded-lg border border-red-800 bg-red-950 p-3 text-xs text-red-100">
-            <p className="font-semibold">Error loading comparison data</p>
-            <p className="mt-1">{multiState.error}</p>
-          </div>
-        )}
-
-        <MultiStockChart data={multiChartData} symbols={multiSymbols} />
       </section>
 
-      {/* Correlation Matrix section */}
-      <section className="rounded-2xl border border-neutral-800 bg-neutral-900 p-4">
-        <div className="mb-4">
-          <h2 className="text-lg font-medium">Correlation Matrix</h2>
-          <p className="text-xs text-neutral-400">
-            Pearson correlation of daily log-returns for the selected time range.
-            SPY (S&amp;P 500) is always included as a market benchmark.
-          </p>
-        </div>
-
-        {isMultiLoading && (
-          <div className="flex h-32 items-center justify-center text-sm text-neutral-400">
-            Loading correlation data…
+      {/* Multi-stock comparison and correlation - side by side on larger screens */}
+      <div className="grid gap-6 xl:grid-cols-5">
+        {/* Multi-stock comparison section */}
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 xl:col-span-3">
+          <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-base font-medium text-neutral-200">
+                Multi-Stock Comparison
+              </h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                Normalized to 1 at range start for relative performance.
+              </p>
+            </div>
+            <div className="w-full sm:w-56">
+              <MultiStockSelector
+                selectedSymbols={multiSelectedSymbols}
+                onChange={setMultiSelectedSymbols}
+                maxSelected={4}
+                disabled={isMultiLoading}
+              />
+            </div>
           </div>
-        )}
 
-        {!isMultiLoading && multiSymbols.length < 1 && (
-          <div className="flex h-32 items-center justify-center text-sm text-neutral-400">
-            Select at least 1 ticker to see the correlation with the S&amp;P 500.
+          {isMultiLoading && (
+            <div className="mb-3 rounded-xl border border-neutral-700/50 bg-neutral-950/50 p-3 text-xs text-neutral-400">
+              Loading comparison data for selected tickers…
+            </div>
+          )}
+
+          {isMultiError && multiState.status === "error" && (
+            <div className="mb-3 rounded-xl border border-red-900/50 bg-red-950/50 p-3 text-xs text-red-200">
+              <p className="font-semibold">Error loading comparison data</p>
+              <p className="mt-1">{multiState.error}</p>
+            </div>
+          )}
+
+          <MultiStockChart data={multiChartData} symbols={multiSymbols} />
+        </section>
+
+        {/* Correlation Matrix section */}
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 xl:col-span-2">
+          <div className="mb-4">
+            <h2 className="text-base font-medium text-neutral-200">
+              Correlation Matrix
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Daily log-return correlations. SPY included as benchmark.
+            </p>
           </div>
-        )}
 
-        {!isMultiLoading && correlationMatrix && (
-          <CorrelationHeatmap matrix={correlationMatrix} />
-        )}
-      </section>
+          {isMultiLoading && (
+            <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+              Loading correlation data…
+            </div>
+          )}
+
+          {!isMultiLoading && multiSymbols.length < 1 && (
+            <div className="flex h-48 items-center justify-center text-center text-sm text-neutral-500">
+              Select at least 1 ticker to see
+              <br />
+              correlation with S&amp;P 500.
+            </div>
+          )}
+
+          {!isMultiLoading && correlationMatrix && (
+            <CorrelationHeatmap matrix={correlationMatrix} />
+          )}
+        </section>
+      </div>
     </div>
   );
 }

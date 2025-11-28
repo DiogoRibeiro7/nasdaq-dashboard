@@ -61,6 +61,8 @@ export const NASDAQ_STOCKS: StockTicker[] = [
   { symbol: "PYPL", name: "PayPal Holdings, Inc." },
   { symbol: "INTU", name: "Intuit Inc." },
   { symbol: "AMAT", name: "Applied Materials, Inc." },
+  { symbol: "PATH", name: "UiPath Inc." },
+  { symbol: "AI", name: "C3.ai, Inc." },
 ] as const;
 
 /**

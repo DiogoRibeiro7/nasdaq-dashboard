@@ -124,12 +124,12 @@ export function CorrelationHeatmap({
         {/* Header row with column labels */}
         <div className="flex">
           {/* Empty corner cell */}
-          <div className="w-16 shrink-0" />
+          <div className="w-14 shrink-0" />
           {/* Column headers */}
           {symbols.map((symbol) => (
             <div
               key={`col-${symbol}`}
-              className="flex w-16 shrink-0 items-center justify-center p-1"
+              className="flex w-[60px] shrink-0 items-center justify-center p-1"
             >
               <span className="text-xs font-semibold text-neutral-300">
                 {symbol}
@@ -142,7 +142,7 @@ export function CorrelationHeatmap({
         {symbols.map((rowSymbol, i) => (
           <div key={`row-${rowSymbol}`} className="flex">
             {/* Row header */}
-            <div className="flex w-16 shrink-0 items-center justify-end pr-2">
+            <div className="flex w-14 shrink-0 items-center justify-end pr-1">
               <span className="text-xs font-semibold text-neutral-300">
                 {rowSymbol}
               </span>
@@ -156,7 +156,7 @@ export function CorrelationHeatmap({
               return (
                 <div
                   key={`cell-${rowSymbol}-${colSymbol}`}
-                  className="flex h-12 w-16 shrink-0 items-center justify-center border border-neutral-800"
+                  className="m-0.5 flex h-11 w-14 shrink-0 items-center justify-center rounded-lg transition-transform hover:scale-105"
                   style={{ backgroundColor: bgColor }}
                   title={`${rowSymbol} vs ${colSymbol}: ${formatCorrelation(value)}`}
                 >

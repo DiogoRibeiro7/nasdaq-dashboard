@@ -36,12 +36,15 @@ export function StockSelector({
 }: StockSelectorProps): JSX.Element {
   return (
     <div className="flex items-center gap-2">
-      <label htmlFor="stock-selector" className="text-sm font-medium">
+      <label
+        htmlFor="stock-selector"
+        className="text-xs font-medium text-neutral-400"
+      >
         Symbol
       </label>
       <select
         id="stock-selector"
-        className="rounded border border-neutral-700 bg-neutral-900 px-2 py-1 text-sm disabled:opacity-60"
+        className="rounded-lg border border-neutral-700 bg-neutral-900/80 px-3 py-1.5 text-sm text-neutral-100 transition-colors hover:border-neutral-600 focus:border-neutral-500 focus:outline-none focus:ring-1 focus:ring-neutral-500 disabled:cursor-not-allowed disabled:opacity-60"
         value={selectedSymbol}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
