@@ -76,16 +76,11 @@ export function MultiRollingCorrelationChart({
   referenceSymbol,
   windowDays,
 }: MultiRollingCorrelationChartProps) {
-  if (series.length === 0 || series.every(s => s.data.length === 0)) {
-    return (
-      <div className="h-64 flex items-center justify-center text-muted-foreground">
-        No correlation data available
-      </div>
-    );
-  }
-
-  // Merge all series data by date
   const mergedData = React.useMemo(() => {
+    if (series.length === 0) {
+      return [];
+    }
+
     const dataByDate = new Map<string, any>();
 
     // Collect all unique dates
@@ -147,6 +142,17 @@ export function MultiRollingCorrelationChart({
     }
     return null;
   };
+
+  const hasData =
+    series.length > 0 && series.some((item) => item.data.length > 0);
+
+  if (!hasData) {
+    return (
+      <div className="h-64 flex items-center justify-center text-muted-foreground">
+        No correlation data available
+      </div>
+    );
+  }
 
   return (
     <ResponsiveContainer width="100%" height={300}>
