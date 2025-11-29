@@ -10,7 +10,7 @@ import {
   Scatter,
   type TooltipProps,
 } from "recharts";
-import { formatCurrency, formatNumber } from "@/lib/format";
+import { formatCurrency, formatNumber, formatAxisNumber } from "@/lib/format";
 
 export type MaTrendPoint = {
   date: string;
@@ -127,6 +127,7 @@ export function MaTrendChart({
             domain={["dataMin", "dataMax"]}
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
+            tickFormatter={formatAxisNumber}
           />
           <Tooltip content={renderTooltip} />
           <Line
