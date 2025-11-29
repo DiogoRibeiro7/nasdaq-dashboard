@@ -8,6 +8,7 @@ import {
   XAxis,
   YAxis,
   Scatter,
+  type TooltipProps,
 } from "recharts";
 import { formatCurrency, formatNumber } from "@/lib/format";
 
@@ -57,11 +58,7 @@ export function MaTrendChart({
     active,
     payload,
     label,
-  }: {
-    active?: boolean;
-    payload?: Array<{ dataKey?: string; value?: number }>;
-    label?: string;
-  }) => {
+  }: TooltipProps<number, string>) => {
     if (!active || !payload || payload.length === 0 || !label) {
       return null;
     }
