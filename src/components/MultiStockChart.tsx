@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import type { MultiChartRow } from "@/lib/types";
+import { formatAxisNumber } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -94,7 +95,7 @@ export function MultiStockChart({
           <YAxis
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
-            tickFormatter={(value: number) => value.toFixed(2)}
+            tickFormatter={(value: number) => formatAxisNumber(value)}
           />
           <Tooltip
             contentStyle={{
@@ -103,7 +104,10 @@ export function MultiStockChart({
               borderRadius: "8px",
             }}
             labelStyle={{ color: "#f5f5f5" }}
-            formatter={(value: number) => value.toFixed(4)}
+            formatter={(value: number | string, name: string) => [
+              formatAxisNumber(Number(value)),
+              name,
+            ]}
           />
           <Legend />
           {symbols.map((symbol, index) => (

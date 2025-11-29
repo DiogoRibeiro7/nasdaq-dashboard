@@ -13,6 +13,19 @@ import {
   computeReturnDistribution,
   computeHigherMoments,
   computeSharpeRatio,
+  computeCapmStats,
+  detectGaps,
+  detectVolumeSpikes,
+  computeMovingAverage,
+  computeDualMovingAverages,
+  detectMovingAverageCrossovers,
+  backtestMaCrossoverStrategy,
+  backtestBuyAndHold,
+  computeRsi,
+  computeMacd,
+  classifyRegimes,
+  computePortfolioSeries,
+  computePortfolioMetrics,
   type CorrelationMatrix,
 } from "@/lib/stats";
 import type { StockTimeSeriesPoint } from "@/lib/types";
@@ -44,6 +57,54 @@ function createSeries(closes: number[]): StockTimeSeriesPoint[] {
     const date = new Date(2024, 0, i + 1).toISOString().split("T")[0];
     return createPoint(date, close);
   });
+}
+
+/**
+ * Creates a fully specified point for event-detection tests.
+ */
+function createCustomPoint(
+  date: string,
+  open: number,
+  close: number,
+  volume: number,
+): StockTimeSeriesPoint {
+  const high = Math.max(open, close);
+  const low = Math.min(open, close);
+
+  return {
+    date,
+    open,
+    high,
+    low,
+    close,
+    adjustedClose: close,
+    volume,
+  };
+}
+
+/**
+ * Creates a close-only series from specified log returns.
+ */
+function createCloseSeriesFromLogReturns(
+  logReturns: number[],
+  startPrice = 100,
+): Array<{ date: string; close: number }> {
+  const series: Array<{ date: string; close: number }> = [];
+  let price = startPrice;
+
+  const startDate = new Date(2024, 0, 1);
+  series.push({
+    date: startDate.toISOString().split("T")[0],
+    close: price,
+  });
+
+  for (let i = 0; i < logReturns.length; i++) {
+    price *= Math.exp(logReturns[i]);
+    const dateObj = new Date(2024, 0, i + 2);
+    series.push({ date: dateObj.toISOString().split("T")[0], close: price });
+  }
+
+  return series;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -539,6 +600,354 @@ describe("computeDrawdown", () => {
     expect(result[0].drawdown).toBe(0);
     expect(result[1].drawdown).toBeCloseTo(-0.1, 5);
     expect(result[2].drawdown).toBe(0); // New high = 0 drawdown
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Event Detection Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("detectGaps", () => {
+  it("should flag days with gaps meeting the threshold", () => {
+    const series = [
+      createCustomPoint("2024-01-01", 100, 100, 100000),
+      createCustomPoint("2024-01-02", 110, 112, 120000),
+      createCustomPoint("2024-01-03", 108, 109, 130000),
+    ];
+
+    const result = detectGaps(series, 0.05);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].date).toBe("2024-01-02");
+    expect(result[0].gapPct).toBeCloseTo(0.1, 5);
+  });
+
+  it("should ignore gaps below the threshold", () => {
+    const series = [
+      createCustomPoint("2024-01-01", 100, 100, 100000),
+      createCustomPoint("2024-01-02", 101.5, 102, 110000), // ~1.5% gap
+    ];
+
+    const result = detectGaps(series, 0.03);
+
+    expect(result).toHaveLength(0);
+  });
+});
+
+describe("detectVolumeSpikes", () => {
+  it("should flag high z-score volume days", () => {
+    const series = [
+      createCustomPoint("2024-01-01", 100, 100, 100),
+      createCustomPoint("2024-01-02", 100, 100, 100),
+      createCustomPoint("2024-01-03", 100, 100, 100),
+      createCustomPoint("2024-01-04", 100, 100, 100),
+      createCustomPoint("2024-01-05", 100, 100, 100),
+      createCustomPoint("2024-01-06", 100, 100, 2000),
+    ];
+
+    const result = detectVolumeSpikes(series, 2);
+
+    expect(result.length).toBe(1);
+    expect(result[0].date).toBe("2024-01-06");
+    expect(result[0].zScore).toBeGreaterThan(2);
+  });
+
+  it("should return empty array when volume has no variance", () => {
+    const series = [
+      createCustomPoint("2024-01-01", 100, 100, 500),
+      createCustomPoint("2024-01-02", 100, 100, 500),
+      createCustomPoint("2024-01-03", 100, 100, 500),
+    ];
+
+    const result = detectVolumeSpikes(series, 2);
+
+    expect(result).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Moving Average Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("computeMovingAverage", () => {
+  it("should compute SMA aligned to first complete window", () => {
+    const series = createSeries([10, 20, 30, 40, 50]).map(({ date, close }) => ({
+      date,
+      close,
+    }));
+    const ma = computeMovingAverage(series, 3);
+
+    expect(ma).toHaveLength(3);
+    expect(ma[0]).toEqual({ date: series[2].date, ma: 20 });
+    expect(ma[2].ma).toBeCloseTo((30 + 40 + 50) / 3, 5);
+  });
+
+  it("should return empty array when window larger than series", () => {
+    const series = createSeries([10, 20]).map(({ date, close }) => ({
+      date,
+      close,
+    }));
+    const ma = computeMovingAverage(series, 5);
+
+    expect(ma).toEqual([]);
+  });
+});
+
+describe("computeDualMovingAverages", () => {
+  it("should merge series with short and long averages", () => {
+    const series = createSeries([10, 20, 30, 40]).map(({ date, close }) => ({
+      date,
+      close,
+    }));
+
+    const result = computeDualMovingAverages(series, 2, 3);
+
+    expect(result).toHaveLength(series.length);
+    expect(result[0].maShort).toBeNull();
+    expect(result[1].maShort).toBe(15);
+    expect(result[2].maLong).toBeCloseTo((10 + 20 + 30) / 3, 5);
+  });
+});
+
+describe("detectMovingAverageCrossovers", () => {
+  it("should detect golden and death crosses", () => {
+    const data = [
+      { date: "2024-01-01", maShort: null, maLong: null },
+      { date: "2024-01-02", maShort: 9, maLong: 10 },
+      { date: "2024-01-03", maShort: 11, maLong: 10 },
+      { date: "2024-01-04", maShort: 12, maLong: 11 },
+      { date: "2024-01-05", maShort: 10, maLong: 11 },
+    ];
+
+    const events = detectMovingAverageCrossovers(data);
+
+    expect(events).toEqual([
+      { date: "2024-01-03", type: "golden" },
+      { date: "2024-01-05", type: "death" },
+    ]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// backtestMaCrossoverStrategy Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("backtestMaCrossoverStrategy", () => {
+  it("should return empty results for empty series", () => {
+    const result = backtestMaCrossoverStrategy([], []);
+    expect(result.trades).toEqual([]);
+    expect(result.equityCurve).toEqual([]);
+    expect(result.totalReturn).toBe(0);
+  });
+
+  it("should generate trades and equity curve", () => {
+    const series = [
+      { date: "2024-01-01", close: 100 },
+      { date: "2024-01-02", close: 105 },
+      { date: "2024-01-03", close: 110 },
+      { date: "2024-01-04", close: 90 },
+    ];
+    const crossovers = [
+      { date: "2024-01-02", type: "golden" },
+      { date: "2024-01-04", type: "death" },
+    ];
+
+    const result = backtestMaCrossoverStrategy(series, crossovers);
+
+    expect(result.trades).toHaveLength(1);
+    expect(result.trades[0]).toMatchObject({
+      entryDate: "2024-01-02",
+      exitDate: "2024-01-04",
+    });
+    expect(result.equityCurve).toHaveLength(series.length);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computeRsi Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("computeRsi", () => {
+  it("should return empty array for empty series", () => {
+    const result = computeRsi([], 14);
+    expect(result).toEqual([]);
+  });
+
+  it("should compute RSI with nulls for insufficient history", () => {
+    const series = createSeries([100, 102, 101, 103, 105, 104, 103, 106]).map(
+      ({ date, close }) => ({ date, close }),
+    );
+    const result = computeRsi(series, 3);
+    expect(result.slice(0, 3).every((point) => point.rsi === null)).toBe(true);
+    expect(result[3].rsi).not.toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computeMacd Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("computeMacd", () => {
+  it("should return empty array for invalid parameters", () => {
+    const series = createSeries([100, 101, 102]).map(({ date, close }) => ({
+      date,
+      close,
+    }));
+    const result = computeMacd(series, 0, 0, 0);
+    expect(result).toEqual([]);
+  });
+
+  it("should compute MACD values", () => {
+    const series = createSeries([
+      100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110,
+    ]).map(({ date, close }) => ({ date, close }));
+    const result = computeMacd(series, 2, 5, 3);
+    expect(result.length).toBe(series.length);
+    expect(result[result.length - 1].macd).not.toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// classifyRegimes Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("classifyRegimes", () => {
+  it("should classify regimes based on MA and RSI", () => {
+    const series = createSeries([100, 101, 102, 101, 99]).map(
+      ({ date, close }) => ({ date, close }),
+    );
+    const maShort = series.map((point) => ({ date: point.date, ma: point.close }));
+    const maLong = series.map((point) => ({ date: point.date, ma: point.close - 1 }));
+    const rsi = series.map((point) => ({ date: point.date, rsi: 60 }));
+
+    const regimes = classifyRegimes({
+      closeSeries: series,
+      maShortSeries: maShort,
+      maLongSeries: maLong,
+      rsiSeries: rsi,
+    });
+
+    expect(regimes.length).toBeGreaterThan(0);
+    expect(regimes[regimes.length - 1].regime).toBe("uptrend");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computePortfolioSeries Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("computePortfolioSeries", () => {
+  it("should return empty array when no symbols", () => {
+    const result = computePortfolioSeries({});
+    expect(result).toEqual([]);
+  });
+
+  it("should normalize and align series", () => {
+    const seriesBySymbol = {
+      AAPL: [
+        { date: "2024-01-01", close: 100 },
+        { date: "2024-01-02", close: 110 },
+      ],
+      MSFT: [
+        { date: "2024-01-01", close: 200 },
+        { date: "2024-01-02", close: 210 },
+      ],
+    };
+
+    const result = computePortfolioSeries(seriesBySymbol);
+    expect(result).toHaveLength(2);
+    expect(result[0].close).toBeCloseTo(1);
+    expect(result[1].close).toBeGreaterThan(1);
+  });
+});
+
+describe("computePortfolioMetrics", () => {
+  it("should handle short series", () => {
+    const result = computePortfolioMetrics([{ date: "2024-01-01", close: 1 }]);
+    expect(result.sharpe).toBeNull();
+    expect(result.volatility).toBeNull();
+  });
+
+  it("should compute metrics for longer series", () => {
+    const series = [
+      { date: "2024-01-01", close: 1 },
+      { date: "2024-01-02", close: 1.02 },
+      { date: "2024-01-03", close: 1.05 },
+    ];
+    const result = computePortfolioMetrics(series);
+    expect(result.returns.length).toBeGreaterThan(0);
+    expect(result.totalReturn).not.toBeNull();
+  });
+});
+
+describe("backtestBuyAndHold", () => {
+  it("should return empty result for empty series", () => {
+    const result = backtestBuyAndHold([]);
+    expect(result.equityCurve).toEqual([]);
+  });
+
+  it("should produce positive return for rising prices", () => {
+    const series = [
+      { date: "2024-01-01", close: 100 },
+      { date: "2024-01-02", close: 120 },
+    ];
+    const result = backtestBuyAndHold(series);
+    expect(result.totalReturn).toBeCloseTo(0.2, 5);
+    expect(result.trades).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// computeCapmStats Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("computeCapmStats", () => {
+  it("should compute beta, alpha, and r2 for aligned series", () => {
+    const benchmarkReturns = [Math.log(1.1), Math.log(0.95), Math.log(1.08), Math.log(0.97)];
+    const betaTrue = 1.2;
+    const alphaTrue = 0.001;
+    const assetReturns = benchmarkReturns.map((r) => alphaTrue + betaTrue * r);
+
+    const benchmarkSeries = createCloseSeriesFromLogReturns(benchmarkReturns);
+    const assetSeries = createCloseSeriesFromLogReturns(assetReturns);
+
+    const stats = computeCapmStats(assetSeries, benchmarkSeries);
+
+    expect(stats.beta).not.toBeNull();
+    expect(stats.beta).toBeCloseTo(betaTrue, 5);
+    expect(stats.alphaDaily).not.toBeNull();
+    expect(stats.alphaDaily).toBeCloseTo(alphaTrue, 5);
+    expect(stats.alphaAnnual).not.toBeNull();
+    expect(stats.alphaAnnual).toBeCloseTo(alphaTrue * 252, 5);
+    expect(stats.r2).not.toBeNull();
+    expect(stats.r2).toBeCloseTo(1, 5);
+  });
+
+  it("should return null metrics when insufficient data", () => {
+    const asset = [{ date: "2024-01-01", close: 100 }];
+    const benchmark = [{ date: "2024-01-01", close: 100 }];
+
+    const stats = computeCapmStats(asset, benchmark);
+
+    expect(stats.beta).toBeNull();
+    expect(stats.alphaDaily).toBeNull();
+    expect(stats.alphaAnnual).toBeNull();
+    expect(stats.r2).toBeNull();
+  });
+
+  it("should return null metrics when benchmark variance is zero", () => {
+    const asset = createCloseSeriesFromLogReturns([Math.log(1.05), Math.log(0.98), Math.log(1.02)]);
+    const constantBenchmarkSeries = createSeries([100, 100, 100, 100]).map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+
+    const stats = computeCapmStats(asset, constantBenchmarkSeries);
+
+    expect(stats.beta).toBeNull();
+    expect(stats.alphaDaily).toBeNull();
+    expect(stats.alphaAnnual).toBeNull();
+    expect(stats.r2).toBeNull();
   });
 });
 

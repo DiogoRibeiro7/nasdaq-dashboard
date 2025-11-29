@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import type { DrawdownPoint } from "@/lib/stats";
+import { formatAxisNumber } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -75,7 +76,7 @@ export function DrawdownChart({ data }: DrawdownChartProps): JSX.Element {
             domain={[yMin, 0]}
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
-            tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`}
+            tickFormatter={(value: number) => `${formatAxisNumber(value * 100)}%`}
             width={45}
           />
           <Tooltip
@@ -88,7 +89,7 @@ export function DrawdownChart({ data }: DrawdownChartProps): JSX.Element {
             labelStyle={{ color: "#f5f5f5" }}
             formatter={(value: number, name: string) => {
               const label = name === "drawdown" ? "Drawdown" : "Max Drawdown";
-              return [`${(value * 100).toFixed(2)}%`, label];
+              return [`${formatAxisNumber(value * 100)}%`, label];
             }}
           />
           <ReferenceLine y={0} stroke="#525252" />

@@ -1,7 +1,7 @@
 "use client";
 
 import type { JSX } from "react";
-import { NASDAQ_STOCKS } from "@/lib/stocks";
+import { ALL_SYMBOLS } from "@/lib/stocks";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -49,7 +49,7 @@ export function StockSelector({
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
       >
-        {NASDAQ_STOCKS.map((stock) => (
+        {ALL_SYMBOLS.map((stock) => (
           <option key={stock.symbol} value={stock.symbol}>
             {stock.symbol} — {stock.name}
           </option>

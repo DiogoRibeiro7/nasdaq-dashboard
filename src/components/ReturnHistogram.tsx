@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import type { ReturnDistributionBin } from "@/lib/stats";
+import { formatAxisNumber } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -64,7 +65,7 @@ export function ReturnHistogram({ data }: ReturnHistogramProps): JSX.Element {
             dataKey="binCenter"
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
-            tickFormatter={(value: number) => `${value.toFixed(1)}%`}
+            tickFormatter={(value: number) => `${formatAxisNumber(value)}%`}
             minTickGap={25}
           />
           <YAxis
@@ -80,8 +81,8 @@ export function ReturnHistogram({ data }: ReturnHistogramProps): JSX.Element {
               fontSize: "12px",
             }}
             labelStyle={{ color: "#f5f5f5" }}
-            formatter={(value: number) => [value, "Count"]}
-            labelFormatter={(label: number) => `Return: ${label.toFixed(2)}%`}
+            formatter={(value: number) => [formatAxisNumber(value), "Count"]}
+            labelFormatter={(label: number) => `Return: ${formatAxisNumber(label)}%`}
           />
           <ReferenceLine x={0} stroke="#525252" strokeDasharray="3 3" />
           <Bar

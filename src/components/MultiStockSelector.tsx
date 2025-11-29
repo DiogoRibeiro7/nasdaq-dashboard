@@ -1,7 +1,7 @@
 "use client";
 
 import type { JSX } from "react";
-import { NASDAQ_STOCKS } from "@/lib/stocks";
+import { ALL_SYMBOLS } from "@/lib/stocks";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -80,7 +80,7 @@ export function MultiStockSelector({
       </div>
       <div className="max-h-40 overflow-y-auto rounded-xl border border-neutral-700/50 bg-neutral-900/80 p-1.5 text-xs scrollbar-thin">
         <ul className="space-y-0.5" role="listbox" aria-label="Stock selection">
-          {NASDAQ_STOCKS.map((stock) => {
+          {ALL_SYMBOLS.map((stock) => {
             const isSelected = selectedSymbols.includes(stock.symbol);
             const isAtLimit = selectedSymbols.length >= maxSelected;
             const isEffectivelyDisabled = disabled || (!isSelected && isAtLimit);

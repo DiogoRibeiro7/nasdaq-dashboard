@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fetchDailySeries } from "@/lib/yahooFinance";
-import { NASDAQ_STOCKS } from "@/lib/stocks";
+import { VALID_SYMBOLS } from "@/lib/stocks";
 import type { StockApiResponse } from "@/lib/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -54,7 +54,7 @@ export async function GET(
   const symbol = rawSymbol.toUpperCase();
 
   // Validate symbol is in the allowed list
-  const isAllowed = NASDAQ_STOCKS.some((stock) => stock.symbol === symbol);
+  const isAllowed = VALID_SYMBOLS.has(symbol);
 
   if (!isAllowed) {
     return NextResponse.json(

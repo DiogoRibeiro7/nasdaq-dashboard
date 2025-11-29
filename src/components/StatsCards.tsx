@@ -2,6 +2,8 @@
 
 import type { JSX } from "react";
 import type { StockStats } from "@/lib/stats";
+import { shouldShowCurrency } from "@/lib/stocks";
+import { formatCurrency, formatNumber, formatPercent } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -13,38 +15,16 @@ import type { StockStats } from "@/lib/stats";
 export type StatsCardsProps = {
   /** Stock statistics to display */
   stats: StockStats;
+  /** Optional symbol to determine currency formatting */
+  symbol?: string;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Formatting Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Formats a percentage value for display.
- * Returns "—" for null or NaN values.
- *
- * @param value - Decimal value (e.g., 0.10 for 10%)
- * @returns Formatted percentage string (e.g., "10.00%")
- */
-function formatPct(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) {
-    return "—";
-  }
-  return `${(value * 100).toFixed(2)}%`;
-}
-
-/**
- * Formats a price value for display.
- * Returns "—" for non-finite values.
- *
- * @param value - Price in dollars
- * @returns Formatted price string (e.g., "$150.25")
- */
-function formatPrice(value: number): string {
-  if (!Number.isFinite(value)) {
-    return "—";
-  }
-  return `$${value.toFixed(2)}`;
+function formatPrice(value: number, showCurrency: boolean = true): string {
+  return showCurrency ? formatCurrency(value) : formatNumber(value);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,27 +49,29 @@ function getReturnColor(value: number | null): string {
  * Shows last closing price and various risk/return metrics.
  * Handles null/undefined values gracefully with placeholder text.
  */
-export function StatsCards({ stats }: StatsCardsProps): JSX.Element {
+export function StatsCards({ stats, symbol }: StatsCardsProps): JSX.Element {
+  const showCurrency = !symbol || shouldShowCurrency(symbol);
+
   return (
     <div className="grid flex-1 grid-cols-2 gap-3 lg:grid-cols-1">
       <StatCard
         label="Last Close"
-        value={formatPrice(stats.lastClose)}
+        value={formatPrice(stats.lastClose, showCurrency)}
         valueClass="text-neutral-100"
       />
       <StatCard
         label="1M Return"
-        value={formatPct(stats.oneMonthReturn)}
+        value={formatPercent(stats.oneMonthReturn)}
         valueClass={getReturnColor(stats.oneMonthReturn)}
       />
       <StatCard
         label="3M Return"
-        value={formatPct(stats.threeMonthReturn)}
+        value={formatPercent(stats.threeMonthReturn)}
         valueClass={getReturnColor(stats.threeMonthReturn)}
       />
       <StatCard
         label="Volatility"
-        value={formatPct(stats.annualizedVolatility)}
+        value={formatPercent(stats.annualizedVolatility)}
         valueClass="text-amber-400"
         subtitle="Annualized"
       />

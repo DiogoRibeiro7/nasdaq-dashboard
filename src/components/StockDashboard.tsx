@@ -15,7 +15,21 @@ import {
   computeReturnDistribution,
   computeHigherMoments,
   computeSharpeRatio,
+  computeRollingCorrelation,
+  computeDualMovingAverages,
+  computeCapmStats,
+  detectGaps,
+  detectVolumeSpikes,
+  detectMovingAverageCrossovers,
+  backtestMaCrossoverStrategy,
+  backtestBuyAndHold,
+  computeRsi,
+  computeMacd,
+  classifyRegimes,
+  computePortfolioSeries,
+  computePortfolioMetrics,
 } from "@/lib/stats";
+import type { PortfolioPoint } from "@/lib/stats";
 import type {
   CorrelationMatrix,
   RollingVolatilityPoint,
@@ -24,6 +38,8 @@ import type {
   DailyLogReturn,
   ReturnDistributionBin,
   HigherMoments,
+  RollingCorrelationPoint,
+  CapmStats,
 } from "@/lib/stats";
 import { MultiStockSelector } from "@/components/MultiStockSelector";
 import { MultiStockChart } from "@/components/MultiStockChart";
@@ -33,16 +49,32 @@ import { RollingReturnChart } from "@/components/RollingReturnChart";
 import { DrawdownChart } from "@/components/DrawdownChart";
 import { ReturnHistogram } from "@/components/ReturnHistogram";
 import { RiskMetricsPanel } from "@/components/RiskMetricsPanel";
+import { MultiRollingCorrelationChart } from "@/components/MultiRollingCorrelationChart";
+import { CapmPanel } from "@/components/CapmPanel";
+import { MaTrendChart } from "@/components/MaTrendChart";
+import { BacktestSummary } from "@/components/BacktestSummary";
+import { EquityCurveChart } from "@/components/EquityCurveChart";
+import { RsiChart } from "@/components/RsiChart";
+import { MacdChart } from "@/components/MacdChart";
+import { RegimeTimeline } from "@/components/RegimeTimeline";
+import { PortfolioChart } from "@/components/PortfolioChart";
+import { PortfolioStatsPanel } from "@/components/PortfolioStatsPanel";
+import { StrategyComparisonTable } from "@/components/StrategyComparisonTable";
 import type {
   ChartPoint,
   FetchState,
   MultiChartRow,
+  StockAnalyticsSnapshot,
   StockApiResponse,
   StockTimeSeriesPoint,
   TimeRange,
 } from "@/lib/types";
 import { TIME_RANGE_DAYS } from "@/lib/types";
-import { SP500_INDEX } from "@/lib/stocks";
+import { formatAxisNumber } from "@/lib/format";
+import {
+  DEFAULT_BENCHMARK_SYMBOL,
+  getSymbolDisplayName,
+} from "@/lib/stocks";
 import { useDashboardSearchParams } from "@/lib/useDashboardSearchParams";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -69,6 +101,26 @@ function filterByRange(
   return series.slice(series.length - days);
 }
 
+function sanitizeShortWindow(value: number, currentLong: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_SHORT_WINDOW;
+  const maxAllowed = Math.max(MIN_MA_WINDOW, currentLong - 1);
+  return Math.min(Math.max(MIN_MA_WINDOW, Math.trunc(value)), maxAllowed);
+}
+
+function sanitizeLongWindow(value: number, currentShort: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_LONG_WINDOW;
+  const minAllowed = Math.max(currentShort + 1, MIN_MA_WINDOW + 1);
+  return Math.max(minAllowed, Math.trunc(value));
+}
+
+const EMPTY_BACKTEST_RESULT = {
+  trades: [],
+  equityCurve: [],
+  totalReturn: 0,
+  maxDrawdown: 0,
+  cagr: null,
+} as const;
+
 /**
  * Extracts an error message from an API response body.
  * Falls back to a generic status-based message if parsing fails.
@@ -83,6 +135,162 @@ async function extractErrorMessage(
     return `Request failed with status ${response.status}`;
   }
 }
+
+type AnalyticsSnapshotInput = {
+  symbol: string;
+  range: TimeRange;
+  stats: ReturnType<typeof computeStats> | null;
+  rangeSeries: StockTimeSeriesPoint[];
+  rollingVol21: RollingVolatilityPoint[];
+  rollingVol63: RollingVolatilityPoint[];
+  rollingRet21: RollingReturnPoint[];
+  drawdownSeries: DrawdownPoint[];
+  sharpeRatio: number | null;
+  higherMoments: HigherMoments;
+  histogram: ReturnDistributionBin[];
+};
+
+function buildAnalyticsSnapshot({
+  symbol,
+  range,
+  stats,
+  rangeSeries,
+  rollingVol21,
+  rollingVol63,
+  rollingRet21,
+  drawdownSeries,
+  sharpeRatio,
+  higherMoments,
+  histogram,
+}: AnalyticsSnapshotInput): StockAnalyticsSnapshot {
+  let maxDrawdown: number | null = null;
+  let maxDrawdownDate: string | null = null;
+
+  for (const point of drawdownSeries) {
+    if (maxDrawdown === null || point.peakToTrough < maxDrawdown) {
+      maxDrawdown = point.peakToTrough;
+      maxDrawdownDate = point.date;
+    }
+  }
+
+  return {
+    symbol,
+    range,
+    generatedAt: new Date().toISOString(),
+    summary: stats,
+    rollingMetrics: {
+      volatility21: rollingVol21,
+      volatility63: rollingVol63,
+      return21: rollingRet21,
+    },
+    drawdown: {
+      series: drawdownSeries,
+      maxDrawdown,
+      maxDrawdownDate,
+    },
+    risk: {
+      sharpeRatio,
+      higherMoments,
+      histogram,
+    },
+    priceSeries: rangeSeries,
+  };
+}
+
+type CsvBuildContext = {
+  rangeSeries: StockTimeSeriesPoint[];
+  dailyReturns: DailyLogReturn[];
+  rollingVol21: RollingVolatilityPoint[];
+  rollingVol63: RollingVolatilityPoint[];
+  rollingRet21: RollingReturnPoint[];
+  drawdown: DrawdownPoint[];
+};
+
+function buildCsvContent({
+  rangeSeries,
+  dailyReturns,
+  rollingVol21,
+  rollingVol63,
+  rollingRet21,
+  drawdown,
+}: CsvBuildContext): string {
+  const logReturnMap = new Map(dailyReturns.map((item) => [item.date, item.r]));
+  const rollingVol21Map = new Map(
+    rollingVol21.map((item) => [item.date, item.vol]),
+  );
+  const rollingVol63Map = new Map(
+    rollingVol63.map((item) => [item.date, item.vol]),
+  );
+  const rollingRet21Map = new Map(
+    rollingRet21.map((item) => [item.date, item.ret]),
+  );
+  const drawdownMap = new Map(drawdown.map((item) => [item.date, item]));
+
+  const header = [
+    "date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "log_return",
+    "rolling_vol_21",
+    "rolling_vol_63",
+    "rolling_return_21",
+    "drawdown",
+    "peak_to_trough",
+  ];
+
+  const rows = rangeSeries.map((point) => {
+    const drawdownPoint = drawdownMap.get(point.date);
+    return [
+      point.date,
+      point.open,
+      point.high,
+      point.low,
+      point.close,
+      point.volume,
+      logReturnMap.get(point.date) ?? "",
+      rollingVol21Map.get(point.date) ?? "",
+      rollingVol63Map.get(point.date) ?? "",
+      rollingRet21Map.get(point.date) ?? "",
+      drawdownPoint?.drawdown ?? "",
+      drawdownPoint?.peakToTrough ?? "",
+    ];
+  });
+
+  const lines = [header, ...rows].map((row) =>
+    row.map(formatCsvValue).join(","),
+  );
+
+  return lines.join("\n");
+}
+
+function formatCsvValue(
+  value: string | number | null | undefined,
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return "";
+  }
+
+  if (typeof value === "number") {
+    return value.toString();
+  }
+
+  const needsEscaping = value.includes(",") || value.includes('"');
+  if (needsEscaping) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+
+  return value;
+}
+
+const EMPTY_CAPM_STATS: CapmStats = {
+  beta: null,
+  alphaDaily: null,
+  alphaAnnual: null,
+  r2: null,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Main Component
@@ -124,11 +332,30 @@ export function StockDashboard(): JSX.Element {
     FetchState<Record<string, StockApiResponse>>
   >({ status: "idle" });
 
+  const [benchmarkState, setBenchmarkState] =
+    useState<FetchState<StockApiResponse>>({ status: "idle" });
+
   // Advanced analytics state
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState<
     "vol21" | "vol63" | "ret21" | "drawdown"
   >("vol21");
+
+  // Rolling correlation window state
+  const [correlationWindow, setCorrelationWindow] = useState<21 | 63 | 126>(63);
+
+  // Event detection thresholds
+  const [gapThreshold, setGapThreshold] = useState(0.03);
+  const [volumeZThreshold, setVolumeZThreshold] = useState(2);
+
+  // Moving average window state for trend analysis
+  const [maShortWindow, setMaShortWindow] = useState(DEFAULT_SHORT_WINDOW);
+  const [maLongWindow, setMaLongWindow] = useState(DEFAULT_LONG_WINDOW);
+  const [rsiPeriod, setRsiPeriod] = useState(DEFAULT_RSI_PERIOD);
+  const [macdFast, setMacdFast] = useState(DEFAULT_MACD_FAST);
+  const [macdSlow, setMacdSlow] = useState(DEFAULT_MACD_SLOW);
+  const [macdSignal, setMacdSignal] = useState(DEFAULT_MACD_SIGNAL);
+  const [volThresholdHigh, setVolThresholdHigh] = useState(0.35);
 
   // ───────────────────────────────────────────────────────────────────────────
   // Data Fetching
@@ -174,7 +401,6 @@ export function StockDashboard(): JSX.Element {
   }, [symbol]);
 
   // Fetch multi-stock data when selected symbols change
-  // Always include SPY (S&P 500) for correlation matrix benchmark
   useEffect(() => {
     if (multiSelectedSymbols.length === 0) {
       setMultiState({ status: "idle" });
@@ -186,10 +412,7 @@ export function StockDashboard(): JSX.Element {
     async function loadMultipleStocks(): Promise<void> {
       setMultiState({ status: "loading" });
 
-      // Always fetch SPY for correlation benchmark, even if not selected
-      const symbolsToFetch = multiSelectedSymbols.includes(SP500_INDEX.symbol)
-        ? multiSelectedSymbols
-        : [SP500_INDEX.symbol, ...multiSelectedSymbols];
+      const symbolsToFetch = multiSelectedSymbols;
 
       try {
         const responses = await Promise.all(
@@ -230,6 +453,42 @@ export function StockDashboard(): JSX.Element {
       cancelled = true;
     };
   }, [multiSelectedSymbols]);
+
+  // Fetch benchmark data (e.g., QQQ) once for CAPM analytics
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadBenchmark(): Promise<void> {
+      setBenchmarkState({ status: "loading" });
+
+      try {
+        const response = await fetch(`/api/stocks/${DEFAULT_BENCHMARK_SYMBOL}`);
+
+        if (!response.ok) {
+          const errorMessage = await extractErrorMessage(response);
+          throw new Error(errorMessage);
+        }
+
+        const data = (await response.json()) as StockApiResponse;
+        if (!cancelled) {
+          setBenchmarkState({ status: "success", data });
+        }
+      } catch (err: unknown) {
+        if (cancelled) return;
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Unexpected error while fetching benchmark data";
+        setBenchmarkState({ status: "error", error: message });
+      }
+    }
+
+    void loadBenchmark();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // ───────────────────────────────────────────────────────────────────────────
   // Derived Data
@@ -301,6 +560,214 @@ export function StockDashboard(): JSX.Element {
     };
   }, [rangeSeries]);
 
+  // Detect gap and volume spike events on the filtered series
+  const events = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return { gaps: [], volumeSpikes: [] };
+    }
+
+    return {
+      gaps: detectGaps(rangeSeries, gapThreshold),
+      volumeSpikes: detectVolumeSpikes(rangeSeries, volumeZThreshold),
+    };
+  }, [rangeSeries, gapThreshold, volumeZThreshold]);
+
+  const maSeries = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return [];
+    }
+
+    const mappedSeries = rangeSeries.map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+
+    return computeDualMovingAverages(
+      mappedSeries,
+      maShortWindow,
+      maLongWindow,
+    );
+  }, [rangeSeries, maShortWindow, maLongWindow]);
+
+  const maCrossovers = useMemo(
+    () => detectMovingAverageCrossovers(maSeries),
+    [maSeries],
+  );
+
+  const rsiData = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return [];
+    }
+
+    const mappedSeries = rangeSeries.map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+
+    return computeRsi(mappedSeries, rsiPeriod);
+  }, [rangeSeries, rsiPeriod]);
+
+  const macdData = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return [];
+    }
+
+    const mappedSeries = rangeSeries.map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+
+    return computeMacd(mappedSeries, macdFast, macdSlow, macdSignal);
+  }, [rangeSeries, macdFast, macdSlow, macdSignal]);
+
+  const regimeData = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return [];
+    }
+
+    return classifyRegimes({
+      closeSeries: rangeSeries.map((point) => ({
+        date: point.date,
+        close: point.close,
+      })),
+      maShortSeries: maSeries.map((point) => ({
+        date: point.date,
+        ma: point.maShort,
+      })),
+      maLongSeries: maSeries.map((point) => ({
+        date: point.date,
+        ma: point.maLong,
+      })),
+      rsiSeries: rsiData,
+      rollingVolSeries: advancedAnalytics.rollingVol21.map((point) => ({
+        date: point.date,
+        vol: point.vol,
+      })),
+      volThresholdHigh,
+    });
+  }, [rangeSeries, maSeries, rsiData, advancedAnalytics.rollingVol21, volThresholdHigh]);
+
+  const maBacktest = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return EMPTY_BACKTEST_RESULT;
+    }
+
+    const mappedSeries = rangeSeries.map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+
+    return backtestMaCrossoverStrategy(mappedSeries, maCrossovers);
+  }, [rangeSeries, maCrossovers]);
+
+  const buyAndHoldBacktest = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return EMPTY_BACKTEST_RESULT;
+    }
+
+    const mappedSeries = rangeSeries.map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+    return backtestBuyAndHold(mappedSeries);
+  }, [rangeSeries]);
+
+  const cashBaseline = useMemo(() => {
+    if (rangeSeries.length === 0) {
+      return EMPTY_BACKTEST_RESULT;
+    }
+
+    const equityCurve = rangeSeries.map((point) => ({
+      date: point.date,
+      equity: 1,
+      drawdown: 0,
+    }));
+
+    return {
+      trades: [],
+      equityCurve,
+      totalReturn: 0,
+      maxDrawdown: 0,
+      cagr: null,
+    };
+  }, [rangeSeries]);
+
+  const strategyComparison = useMemo(
+    () => [
+      { name: "Buy & hold", result: buyAndHoldBacktest },
+      { name: "MA crossover", result: maBacktest },
+      { name: "Cash (no trades)", result: cashBaseline },
+    ],
+    [buyAndHoldBacktest, maBacktest, cashBaseline],
+  );
+
+  const recentCrossovers = useMemo(() => {
+    const sorted = [...maCrossovers].sort((a, b) =>
+      a.date < b.date ? 1 : a.date > b.date ? -1 : 0,
+    );
+    return sorted.slice(0, 10);
+  }, [maCrossovers]);
+
+  const analyticsSnapshot = useMemo<StockAnalyticsSnapshot | null>(() => {
+    if (rangeSeries.length === 0) {
+      return null;
+    }
+
+    return buildAnalyticsSnapshot({
+      symbol,
+      range,
+      stats,
+      rangeSeries,
+      rollingVol21: advancedAnalytics.rollingVol21,
+      rollingVol63: advancedAnalytics.rollingVol63,
+      rollingRet21: advancedAnalytics.rollingRet21,
+      drawdownSeries: advancedAnalytics.drawdown,
+      sharpeRatio: returnDistribution.sharpeRatio,
+      higherMoments: returnDistribution.moments,
+      histogram: returnDistribution.histogram,
+    });
+  }, [
+    symbol,
+    range,
+    stats,
+    rangeSeries,
+    advancedAnalytics,
+    returnDistribution.histogram,
+    returnDistribution.moments,
+    returnDistribution.sharpeRatio,
+  ]);
+
+  const capmStats = useMemo(() => {
+    if (
+      singleState.status !== "success" ||
+      benchmarkState.status !== "success"
+    ) {
+      return EMPTY_CAPM_STATS;
+    }
+
+    const assetSeries = filterByRange(singleState.data.series, range).map(
+      (point) => ({
+        date: point.date,
+        close: point.close,
+      }),
+    );
+
+    const benchmarkSeries = filterByRange(benchmarkState.data.series, range).map(
+      (point) => ({
+        date: point.date,
+        close: point.close,
+      }),
+    );
+
+    if (assetSeries.length < 2 || benchmarkSeries.length < 2) {
+      return EMPTY_CAPM_STATS;
+    }
+
+    return computeCapmStats(assetSeries, benchmarkSeries);
+  }, [singleState, benchmarkState, range]);
+
+  // NOTE: returnDistribution defined above
+
   const { multiChartData, multiSymbols } = useMemo(() => {
     if (multiState.status !== "success") {
       return {
@@ -365,30 +832,47 @@ export function StockDashboard(): JSX.Element {
     };
   }, [multiState, multiSelectedSymbols, range]);
 
+  const portfolioData = useMemo(() => {
+    if (multiState.status !== "success" || multiSymbols.length < 2) {
+      return {
+        series: [] as PortfolioPoint[],
+        metrics: {
+          returns: [],
+          sharpe: null,
+          volatility: null,
+          maxDrawdown: null,
+          totalReturn: null,
+        },
+      };
+    }
+
+    const seriesBySymbol: Record<string, { date: string; close: number }[]> = {};
+    for (const sym of multiSymbols) {
+      const stock = multiState.data[sym];
+      if (!stock) continue;
+      const filtered = filterByRange(stock.series, range).map((point) => ({
+        date: point.date,
+        close: point.close,
+      }));
+      seriesBySymbol[sym] = filtered;
+    }
+
+    const series = computePortfolioSeries(seriesBySymbol);
+    const metrics = computePortfolioMetrics(series);
+    return { series, metrics };
+  }, [multiState, multiSymbols, range]);
+
   // Compute correlation matrix from multi-stock data
-  // Always includes SPY (S&P 500) as a benchmark for market correlation
   const correlationMatrix = useMemo((): CorrelationMatrix | null => {
     if (multiState.status !== "success") {
       return null;
     }
 
     // Prepare data for correlation calculation
-    // Always include SPY for market benchmark correlation
     const seriesBySymbol: Record<string, { date: string; close: number }[]> = {};
 
-    // Include SPY first as the benchmark
-    const spySeries = multiState.data[SP500_INDEX.symbol]?.series;
-    if (spySeries) {
-      const rangeSeries = filterByRange(spySeries, range);
-      seriesBySymbol[SP500_INDEX.symbol] = rangeSeries.map((point) => ({
-        date: point.date,
-        close: point.close,
-      }));
-    }
-
-    // Add selected symbols
+    // Add all selected symbols
     for (const sym of multiSymbols) {
-      if (sym === SP500_INDEX.symbol) continue; // Already added
       const series = multiState.data[sym]?.series;
       if (!series) continue;
 
@@ -407,6 +891,48 @@ export function StockDashboard(): JSX.Element {
     return computeCorrelationMatrix(seriesBySymbol);
   }, [multiState, multiSymbols, range]);
 
+  // Compute rolling correlations when multiple symbols are selected
+  const rollingCorrelations = useMemo(() => {
+    if (multiState.status !== "success" || multiSymbols.length < 2) {
+      return [];
+    }
+
+    // Use first symbol as reference
+    const referenceSymbol = multiSymbols[0];
+    const referenceSeries = multiState.data[referenceSymbol]?.series;
+    if (!referenceSeries) return [];
+
+    // Convert to CorrelationInput format and filter by range
+    const referenceData = filterByRange(referenceSeries, range).map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+
+    // Compute rolling correlation for each other symbol vs reference
+    const correlations: Array<{
+      symbol: string;
+      data: RollingCorrelationPoint[];
+    }> = [];
+
+    for (let i = 1; i < multiSymbols.length; i++) {
+      const symbol = multiSymbols[i];
+      const series = multiState.data[symbol]?.series;
+      if (!series) continue;
+
+      const symbolData = filterByRange(series, range).map((point) => ({
+        date: point.date,
+        close: point.close,
+      }));
+
+      const corrData = computeRollingCorrelation(referenceData, symbolData, correlationWindow);
+      if (corrData.length > 0) {
+        correlations.push({ symbol, data: corrData });
+      }
+    }
+
+    return correlations;
+  }, [multiState, multiSymbols, range, correlationWindow]);
+
   // ───────────────────────────────────────────────────────────────────────────
   // Derived State Flags
   // ───────────────────────────────────────────────────────────────────────────
@@ -415,12 +941,81 @@ export function StockDashboard(): JSX.Element {
   const isSingleError = singleState.status === "error";
   const isMultiLoading = multiState.status === "loading";
   const isMultiError = multiState.status === "error";
+  const isBenchmarkLoading = benchmarkState.status === "loading";
+  const isBenchmarkError = benchmarkState.status === "error";
+  const assetDisplayName = getSymbolDisplayName(symbol);
+  const benchmarkDisplayName = getSymbolDisplayName(DEFAULT_BENCHMARK_SYMBOL);
+
+  const buildFilename = (extension: string): string => {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    return `${symbol}_${range}_${timestamp}.${extension}`;
+  };
+
+  const triggerDownload = (blob: Blob, filename: string): void => {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadJsonSnapshot = (): void => {
+    if (!analyticsSnapshot) {
+      return;
+    }
+
+    const filename = buildFilename("analytics.json");
+    const blob = new Blob([JSON.stringify(analyticsSnapshot, null, 2)], {
+      type: "application/json",
+    });
+    triggerDownload(blob, filename);
+  };
+
+  const handleDownloadCsv = (): void => {
+    if (rangeSeries.length === 0) {
+      return;
+    }
+
+    const csvContent = buildCsvContent({
+      rangeSeries,
+      dailyReturns: returnDistribution.dailyReturns,
+      rollingVol21: advancedAnalytics.rollingVol21,
+      rollingVol63: advancedAnalytics.rollingVol63,
+      rollingRet21: advancedAnalytics.rollingRet21,
+      drawdown: advancedAnalytics.drawdown,
+    });
+
+    const filename = buildFilename("analytics.csv");
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+    triggerDownload(blob, filename);
+  };
+
+  const handleShortWindowChange = (value: number): void => {
+    setMaShortWindow((currentShort) => {
+      const sanitized = sanitizeShortWindow(value, maLongWindow);
+      return sanitized !== currentShort ? sanitized : currentShort;
+    });
+  };
+
+  const handleLongWindowChange = (value: number): void => {
+    setMaLongWindow((currentLong) => {
+      const sanitized = sanitizeLongWindow(value, maShortWindow);
+      return sanitized !== currentLong ? sanitized : currentLong;
+    });
+  };
 
   // ───────────────────────────────────────────────────────────────────────────
   // Render
   // ───────────────────────────────────────────────────────────────────────────
 
   const timeRangeOptions: TimeRange[] = ["1M", "3M", "6M", "1Y", "MAX"];
+  const gapThresholdOptions = [0.02, 0.03, 0.05, 0.08];
+  const volumeThresholdOptions = [1.5, 2, 2.5, 3];
 
   return (
     <div className="flex flex-col gap-6">
@@ -460,6 +1055,24 @@ export function StockDashboard(): JSX.Element {
               ))}
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleDownloadJsonSnapshot}
+              disabled={!analyticsSnapshot}
+              className="rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-100 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Download JSON snapshot
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadCsv}
+              disabled={rangeSeries.length === 0}
+              className="rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-100 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Download CSV (daily metrics)
+            </button>
+          </div>
         </div>
       </header>
 
@@ -486,13 +1099,68 @@ export function StockDashboard(): JSX.Element {
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Price chart section - takes 2/3 on large screens */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-2">
-          <h2 className="mb-3 text-base font-medium text-neutral-200">
-            {singleState.status === "success"
-              ? `${singleState.data.symbol} — Price History`
-              : "Price History"}
-          </h2>
+          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h2 className="text-base font-medium text-neutral-200">
+                {singleState.status === "success"
+                  ? `${singleState.data.symbol} — Price History`
+                  : "Price History"}
+              </h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                Markers highlight gap opens and abnormal volume within the selected range.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rotate-45 bg-orange-400" aria-hidden="true" />
+                  <span className="text-xs font-medium text-neutral-300">
+                    Gap &ge;
+                  </span>
+                </div>
+                <select
+                  className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-100 outline-none ring-0 focus:border-neutral-500"
+                  value={gapThreshold}
+                  onChange={(e) => setGapThreshold(Number(e.target.value))}
+                >
+                  {gapThresholdOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {`${formatAxisNumber(value * 100)}%`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2 rounded-xl border border-neutral-800 bg-neutral-900 px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <span className="h-2.5 w-2.5 rounded-full bg-sky-400" aria-hidden="true" />
+                  <span className="text-xs font-medium text-neutral-300">
+                    Volume z
+                  </span>
+                </div>
+                <select
+                  className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-100 outline-none ring-0 focus:border-neutral-500"
+                  value={volumeZThreshold}
+                  onChange={(e) => setVolumeZThreshold(Number(e.target.value))}
+                >
+                  {volumeThresholdOptions.map((value) => (
+                    <option key={value} value={value}>
+                      {formatAxisNumber(value)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="hidden text-[11px] text-neutral-500 sm:block">
+                {events.gaps.length} gaps · {events.volumeSpikes.length} volume spikes
+              </div>
+            </div>
+          </div>
           {singleChartData.length > 0 ? (
-            <StockChart data={singleChartData} />
+            <StockChart
+              data={singleChartData}
+              symbol={symbol}
+              gapEvents={events.gaps}
+              volumeEvents={events.volumeSpikes}
+            />
           ) : (
             <div className="flex h-72 items-center justify-center text-sm text-neutral-500">
               {isSingleLoading
@@ -508,7 +1176,7 @@ export function StockDashboard(): JSX.Element {
             Risk &amp; Return
           </h2>
           {stats ? (
-            <StatsCards stats={stats} />
+            <StatsCards stats={stats} symbol={symbol} />
           ) : (
             <div className="flex flex-1 items-center justify-center text-sm text-neutral-500">
               Not enough data to compute statistics.
@@ -516,6 +1184,323 @@ export function StockDashboard(): JSX.Element {
           )}
         </section>
       </div>
+
+      {/* Trend signals section */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4">
+          <h2 className="text-base font-medium text-neutral-200">
+            Trend signals (moving average crossovers)
+          </h2>
+          <p className="mt-1 text-xs text-neutral-500">
+            Golden cross = short MA crossing above long MA (bullish). Death cross = short MA crossing below long MA (bearish).
+          </p>
+        </div>
+        <div className="mb-4 flex flex-wrap gap-4">
+          <label className="flex items-center gap-2 text-xs text-neutral-400">
+            Short window
+            <input
+              type="number"
+              min={MIN_MA_WINDOW}
+              max={maLongWindow - 1}
+              value={maShortWindow}
+              onChange={(event) =>
+                handleShortWindowChange(Number(event.target.value))
+              }
+              className="w-20 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+            />
+          </label>
+          <label className="flex items-center gap-2 text-xs text-neutral-400">
+            Long window
+            <input
+              type="number"
+              min={maShortWindow + 1}
+              value={maLongWindow}
+              onChange={(event) =>
+                handleLongWindowChange(Number(event.target.value))
+              }
+              className="w-20 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+            />
+          </label>
+        </div>
+        {rangeSeries.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Select a date range with data to view moving averages.
+          </div>
+        ) : maSeries.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Need at least {maLongWindow} days of history to compute the long moving average.
+          </div>
+        ) : (
+          <>
+            <MaTrendChart
+              data={maSeries}
+              shortWindow={maShortWindow}
+              longWindow={maLongWindow}
+              crossovers={maCrossovers}
+            />
+            {maCrossovers.length === 0 ? (
+              <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+                No golden or death crosses detected within the selected range.
+              </div>
+            ) : (
+              <div className="mt-4">
+                <h3 className="text-sm font-medium text-neutral-200">
+                  Recent crossover events
+                </h3>
+                <table className="mt-2 w-full table-auto border-collapse text-xs text-neutral-300">
+                  <thead>
+                    <tr className="text-left text-neutral-500">
+                      <th className="border-b border-neutral-800 px-2 py-2 font-medium">
+                        Date
+                      </th>
+                      <th className="border-b border-neutral-800 px-2 py-2 font-medium">
+                        Type
+                      </th>
+                      <th className="border-b border-neutral-800 px-2 py-2 font-medium">
+                        Short (d)
+                      </th>
+                      <th className="border-b border-neutral-800 px-2 py-2 font-medium">
+                        Long (d)
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentCrossovers.map((event) => (
+                      <tr key={event.date}>
+                        <td className="border-b border-neutral-900 px-2 py-2 text-neutral-200">
+                          {event.date}
+                        </td>
+                        <td className="border-b border-neutral-900 px-2 py-2 font-semibold">
+                          {event.type === "golden" ? (
+                            <span className="text-emerald-400">Golden</span>
+                          ) : (
+                            <span className="text-red-400">Death</span>
+                          )}
+                        </td>
+                        <td className="border-b border-neutral-900 px-2 py-2">
+                          {maShortWindow}
+                        </td>
+                        <td className="border-b border-neutral-900 px-2 py-2">
+                          {maLongWindow}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="mt-6 space-y-4">
+              <BacktestSummary
+                result={maBacktest}
+                symbol={symbol}
+                shortWindow={maShortWindow}
+                longWindow={maLongWindow}
+              />
+              <EquityCurveChart result={maBacktest} />
+              <div>
+                <h3 className="mb-2 text-sm font-medium text-neutral-200">
+                  Strategy comparison
+                </h3>
+                <StrategyComparisonTable strategies={strategyComparison} />
+              </div>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* Regime Classification */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-base font-medium text-neutral-200">
+              Regime Classification
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Combines moving averages, RSI, and volatility to highlight daily market regimes.
+            </p>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-neutral-400">
+            Volatility threshold
+            <input
+              type="number"
+              min={0.05}
+              step={0.05}
+              value={volThresholdHigh}
+              onChange={(event) =>
+                setVolThresholdHigh(
+                  Math.max(0.05, Number(event.target.value) || 0.35),
+                )
+              }
+              className="w-20 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+            />
+            <span className="text-[11px] text-neutral-500">
+              Annualized vol
+            </span>
+          </label>
+        </div>
+
+        {regimeData.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Not enough aligned data to classify regimes.
+          </div>
+        ) : (
+          <>
+            <RegimeTimeline regimes={regimeData} />
+            <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-neutral-400 sm:grid-cols-4">
+              {(["uptrend", "downtrend", "sideways", "high-volatility"] as const).map(
+                (regime) => {
+                  const count = regimeData.filter((point) => point.regime === regime).length;
+                  const pct = count / regimeData.length;
+                  return (
+                    <div key={regime} className="rounded-lg border border-neutral-800 bg-neutral-950/50 p-3">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+                        {regime.replace("-", " ")}
+                      </div>
+                      <div className="mt-1 text-base font-semibold text-neutral-100">
+                        {formatAxisNumber(pct * 100)}%
+                        <span className="ml-1 text-[11px] text-neutral-500">
+                          ({count} days)
+                        </span>
+                      </div>
+                    </div>
+                  );
+                },
+              )}
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* Momentum & Oscillators */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+          <div>
+            <h2 className="text-base font-medium text-neutral-200">
+              Momentum &amp; Oscillators
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              RSI highlights overbought (&gt;70) / oversold (&lt;30). MACD shows momentum shifts (MACD vs signal).
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-3 text-xs text-neutral-400">
+            <label className="flex items-center gap-1">
+              RSI period
+              <input
+                type="number"
+                min={2}
+                max={100}
+                value={rsiPeriod}
+                onChange={(event) => setRsiPeriod(Number(event.target.value) || DEFAULT_RSI_PERIOD)}
+                className="w-16 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              MACD fast
+              <input
+                type="number"
+                min={2}
+                value={macdFast}
+                onChange={(event) => setMacdFast(Number(event.target.value) || DEFAULT_MACD_FAST)}
+                className="w-16 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              MACD slow
+              <input
+                type="number"
+                min={macdFast + 1}
+                value={macdSlow}
+                onChange={(event) =>
+                  setMacdSlow(
+                    Math.max(Number(event.target.value) || DEFAULT_MACD_SLOW, macdFast + 1),
+                  )
+                }
+                className="w-16 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              MACD signal
+              <input
+                type="number"
+                min={2}
+                value={macdSignal}
+                onChange={(event) => setMacdSignal(Number(event.target.value) || DEFAULT_MACD_SIGNAL)}
+                className="w-16 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              />
+            </label>
+          </div>
+        </div>
+
+        {rangeSeries.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Select a range with data to compute RSI/MACD.
+          </div>
+        ) : (
+          <>
+            <div className="space-y-4">
+              <RsiChart data={rsiData} period={rsiPeriod} />
+              <MacdChart
+                data={macdData}
+                fastPeriod={macdFast}
+                slowPeriod={macdSlow}
+                signalPeriod={macdSignal}
+              />
+            </div>
+            <div className="mt-3 text-xs text-neutral-400">
+              Latest RSI:{" "}
+              {rsiData.length > 0 && rsiData[rsiData.length - 1].rsi !== null
+                ? formatAxisNumber(rsiData[rsiData.length - 1].rsi!)
+                : "—"}
+              . MACD is{" "}
+              {(() => {
+                const latest = macdData[macdData.length - 1];
+                if (!latest || latest.macd === null || latest.signal === null) {
+                  return "undefined relative to signal.";
+                }
+                return latest.macd > latest.signal ? "above signal (bullish)." : "below signal (bearish).";
+              })()}
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* Benchmark analytics / CAPM */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+          <div>
+            <h2 className="text-base font-medium text-neutral-200">
+              Benchmark Analytics
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              CAPM regression vs {benchmarkDisplayName} ({DEFAULT_BENCHMARK_SYMBOL}).
+            </p>
+          </div>
+          <span className="text-xs text-neutral-500">
+            Using {range === "MAX" ? "full history" : range} window
+          </span>
+        </div>
+        {isBenchmarkLoading || isSingleLoading ? (
+          <div className="flex h-28 items-center justify-center text-sm text-neutral-500">
+            Loading benchmark analytics…
+          </div>
+        ) : isBenchmarkError ? (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
+            <p className="font-semibold">Unable to load benchmark data</p>
+            <p className="mt-1 text-xs text-red-300">{benchmarkState.error}</p>
+          </div>
+        ) : singleState.status !== "success" ||
+          benchmarkState.status !== "success" ? (
+          <div className="flex h-28 items-center justify-center text-sm text-neutral-500">
+            Select a symbol to see CAPM analytics.
+          </div>
+        ) : (
+          <CapmPanel
+            stats={capmStats}
+            assetName={assetDisplayName}
+            benchmarkName={benchmarkDisplayName}
+          />
+        )}
+      </section>
 
       {/* Return Distribution & Risk Profile */}
       <div className="grid gap-6 lg:grid-cols-5">
@@ -728,7 +1713,7 @@ export function StockDashboard(): JSX.Element {
               Correlation Matrix
             </h2>
             <p className="mt-1 text-xs text-neutral-500">
-              Daily log-return correlations. SPY included as benchmark.
+              Daily log-return correlations between selected symbols.
             </p>
           </div>
 
@@ -738,11 +1723,11 @@ export function StockDashboard(): JSX.Element {
             </div>
           )}
 
-          {!isMultiLoading && multiSymbols.length < 1 && (
+          {!isMultiLoading && multiSymbols.length < 2 && (
             <div className="flex h-48 items-center justify-center text-center text-sm text-neutral-500">
-              Select at least 1 ticker to see
+              Select at least 2 tickers to see
               <br />
-              correlation with S&amp;P 500.
+              their correlation matrix.
             </div>
           )}
 
@@ -751,6 +1736,97 @@ export function StockDashboard(): JSX.Element {
           )}
         </section>
       </div>
+
+      {/* Portfolio view */}
+      {portfolioData.series.length > 0 && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h2 className="text-base font-medium text-neutral-200">
+                Portfolio (equal-weight)
+              </h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                Normalized to 1 on the first common date of {multiSymbols.join(", ")}.
+              </p>
+            </div>
+            <div className="text-xs text-neutral-500">
+              {multiSymbols.length} tickers
+            </div>
+          </div>
+          <PortfolioStatsPanel
+            volatility={portfolioData.metrics.volatility}
+            sharpe={portfolioData.metrics.sharpe}
+            maxDrawdown={portfolioData.metrics.maxDrawdown}
+            totalReturn={portfolioData.metrics.totalReturn}
+          />
+          <div className="mt-4">
+            <PortfolioChart data={portfolioData.series} />
+          </div>
+        </section>
+      )}
+
+      {/* Rolling Correlations Section - Only show when 2+ symbols selected */}
+      {multiSymbols.length >= 2 && rollingCorrelations.length > 0 && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h2 className="text-base font-medium text-neutral-200">
+                  Rolling Correlations (vs {multiSymbols[0]})
+                </h2>
+                <p className="mt-1 text-xs text-neutral-500">
+                  {correlationWindow}-day rolling correlation coefficients over time. Reference ticker: {multiSymbols[0]}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-neutral-400">Window</span>
+                <div className="flex rounded-lg border border-neutral-700 bg-neutral-900/50 p-0.5">
+                  {([21, 63, 126] as const).map((window) => (
+                    <button
+                      key={window}
+                      type="button"
+                      onClick={() => setCorrelationWindow(window)}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+                        window === correlationWindow
+                          ? "bg-neutral-100 text-neutral-900 shadow-sm"
+                          : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
+                      }`}
+                      title={
+                        window === 21
+                          ? "1 month (21 trading days)"
+                          : window === 63
+                          ? "3 months (63 trading days)"
+                          : "6 months (126 trading days)"
+                      }
+                    >
+                      {window}d
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {isMultiLoading ? (
+            <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+              Loading rolling correlation data…
+            </div>
+          ) : (
+            <MultiRollingCorrelationChart
+              series={rollingCorrelations}
+              referenceSymbol={multiSymbols[0]}
+              windowDays={correlationWindow}
+            />
+          )}
+        </section>
+      )}
     </div>
   );
 }
+const DEFAULT_SHORT_WINDOW = 20;
+const DEFAULT_LONG_WINDOW = 50;
+const MIN_MA_WINDOW = 2;
+const DEFAULT_RSI_PERIOD = 14;
+const DEFAULT_MACD_FAST = 12;
+const DEFAULT_MACD_SLOW = 26;
+const DEFAULT_MACD_SIGNAL = 9;

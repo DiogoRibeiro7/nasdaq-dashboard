@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts";
 import type { RollingReturnPoint } from "@/lib/stats";
+import { formatAxisNumber } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -69,7 +70,7 @@ export function RollingReturnChart({
           <YAxis
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
-            tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`}
+            tickFormatter={(value: number) => `${formatAxisNumber(value * 100)}%`}
             width={45}
           />
           <Tooltip
@@ -81,7 +82,7 @@ export function RollingReturnChart({
             }}
             labelStyle={{ color: "#f5f5f5" }}
             formatter={(value: number) => [
-              `${(value * 100).toFixed(2)}%`,
+              `${formatAxisNumber(value * 100)}%`,
               `${windowDays}d Return`,
             ]}
           />

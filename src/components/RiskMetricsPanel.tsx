@@ -2,6 +2,7 @@
 
 import type { JSX } from "react";
 import type { HigherMoments } from "@/lib/stats";
+import { formatNumber, formatPercent } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -23,26 +24,6 @@ export type RiskMetricsPanelProps = {
 
 /** Trading days per year for annualization */
 const TRADING_DAYS_PER_YEAR = 252;
-
-/**
- * Formats a percentage value for display.
- */
-function formatPct(value: number, decimals: number = 2): string {
-  if (!Number.isFinite(value)) {
-    return "—";
-  }
-  return `${(value * 100).toFixed(decimals)}%`;
-}
-
-/**
- * Formats a number with specified decimal places.
- */
-function formatNumber(value: number | null, decimals: number = 2): string {
-  if (value === null || !Number.isFinite(value)) {
-    return "—";
-  }
-  return value.toFixed(decimals);
-}
 
 /**
  * Determines the color class for skewness value.
@@ -117,22 +98,22 @@ export function RiskMetricsPanel({
     <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3">
       <MetricCard
         label="Daily Mean"
-        value={formatPct(mean, 3)}
+        value={formatPercent(mean)}
         valueClass="text-neutral-200"
       />
       <MetricCard
         label="Annual Mean"
-        value={formatPct(meanAnnual, 1)}
+        value={formatPercent(meanAnnual)}
         valueClass={meanAnnual > 0 ? "text-green-400" : meanAnnual < 0 ? "text-red-400" : "text-neutral-200"}
       />
       <MetricCard
         label="Daily Vol"
-        value={formatPct(std, 3)}
+        value={formatPercent(std)}
         valueClass="text-amber-400"
       />
       <MetricCard
         label="Annual Vol"
-        value={formatPct(stdAnnual, 1)}
+        value={formatPercent(stdAnnual)}
         valueClass="text-amber-400"
       />
       <MetricCard

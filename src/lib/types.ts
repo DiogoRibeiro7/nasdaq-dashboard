@@ -1,3 +1,12 @@
+import type {
+  DrawdownPoint,
+  HigherMoments,
+  ReturnDistributionBin,
+  RollingReturnPoint,
+  RollingVolatilityPoint,
+  StockStats,
+} from "./stats";
+
 /**
  * Shared type definitions for the stock dashboard.
  *
@@ -94,4 +103,42 @@ export type ChartPoint = {
 export type MultiChartRow = {
   date: string;
   [symbol: string]: string | number;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analytics Snapshot Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Snapshot of analytics for a stock over a selected time range.
+ */
+export type StockAnalyticsSnapshot = {
+  /** Symbol the analytics were generated for */
+  symbol: string;
+  /** Selected time range */
+  range: TimeRange;
+  /** ISO timestamp when the snapshot was generated */
+  generatedAt: string;
+  /** Summary statistics (same fields as StatsCards) */
+  summary: StockStats | null;
+  /** Rolling metrics collections */
+  rollingMetrics: {
+    volatility21: RollingVolatilityPoint[];
+    volatility63: RollingVolatilityPoint[];
+    return21: RollingReturnPoint[];
+  };
+  /** Drawdown series and derived metadata */
+  drawdown: {
+    series: DrawdownPoint[];
+    maxDrawdown: number | null;
+    maxDrawdownDate: string | null;
+  };
+  /** Distribution-based risk metrics */
+  risk: {
+    sharpeRatio: number | null;
+    higherMoments: HigherMoments;
+    histogram: ReturnDistributionBin[];
+  };
+  /** Underlying price series used for analytics */
+  priceSeries: StockTimeSeriesPoint[];
 };

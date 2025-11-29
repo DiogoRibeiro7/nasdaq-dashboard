@@ -126,8 +126,8 @@ export async function fetchDailySeries(
     throw new Error("Symbol is required");
   }
 
-  // Validate symbol format (basic check for alphanumeric with optional dots/dashes)
-  if (!/^[A-Z0-9.-]+$/.test(trimmedSymbol)) {
+  // Validate symbol format (basic check for alphanumeric with optional dots/dashes/equals/carets)
+  if (!/^[A-Z0-9.\-=^]+$/.test(trimmedSymbol)) {
     throw new Error("Invalid symbol format");
   }
 

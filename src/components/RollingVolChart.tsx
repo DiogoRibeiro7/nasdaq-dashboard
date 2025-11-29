@@ -11,6 +11,7 @@ import {
   YAxis,
 } from "recharts";
 import type { RollingVolatilityPoint } from "@/lib/stats";
+import { formatAxisNumber } from "@/lib/format";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -68,7 +69,7 @@ export function RollingVolChart({
             domain={[0, "auto"]}
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
-            tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`}
+            tickFormatter={(value: number) => `${formatAxisNumber(value * 100)}%`}
             width={45}
           />
           <Tooltip
@@ -80,7 +81,7 @@ export function RollingVolChart({
             }}
             labelStyle={{ color: "#f5f5f5" }}
             formatter={(value: number) => [
-              `${(value * 100).toFixed(2)}%`,
+              `${formatAxisNumber(value * 100)}%`,
               `${windowDays}d Vol`,
             ]}
           />
