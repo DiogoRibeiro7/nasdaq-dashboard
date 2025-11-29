@@ -1,7 +1,7 @@
 "use client";
 
 import type { JSX } from "react";
-import { formatPercent, formatAxisNumber } from "@/lib/format";
+import { formatPercent } from "@/lib/format";
 import type { BacktestResult } from "@/lib/stats";
 
 export type StrategyComparisonTableProps = {
@@ -13,7 +13,7 @@ export type StrategyComparisonTableProps = {
 
 export function StrategyComparisonTable({
   strategies,
-}: StrategyComparisonTableProps): JSX.Element {
+}: StrategyComparisonTableProps): JSX.Element | null {
   if (strategies.length === 0) {
     return null;
   }

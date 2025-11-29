@@ -30,6 +30,35 @@ type MaTrendCrossoverPoint = MaTrendPoint & {
   crossoverType: "golden" | "death";
 };
 
+type CrossoverMarkerProps = {
+  cx?: number;
+  cy?: number;
+  payload?: MaTrendCrossoverPoint;
+};
+
+const renderCrossoverMarker = ({
+  payload,
+  cx,
+  cy,
+}: CrossoverMarkerProps): JSX.Element => {
+  if (!payload) {
+    return <></>;
+  }
+  const isGolden = payload.crossoverType === "golden";
+  const markerX = (cx ?? 0) - 5;
+  const markerY = (cy ?? 0) - 5;
+
+  return (
+    <svg x={markerX} y={markerY} width={10} height={10}>
+      {isGolden ? (
+        <circle cx={5} cy={5} r={4} fill="#22c55e" />
+      ) : (
+        <rect width={10} height={10} fill="#ef4444" />
+      )}
+    </svg>
+  );
+};
+
 export function MaTrendChart({
   data,
   shortWindow,
@@ -130,19 +159,7 @@ export function MaTrendChart({
             <Scatter
               data={markers}
               dataKey="close"
-              shape={(props) => {
-                if (!props.payload) return null;
-                const isGolden = props.payload.crossoverType === "golden";
-                return (
-                  <svg x={props.cx - 5} y={props.cy - 5} width={10} height={10}>
-                    {isGolden ? (
-                      <circle cx={5} cy={5} r={4} fill="#22c55e" />
-                    ) : (
-                      <rect width={10} height={10} fill="#ef4444" />
-                    )}
-                  </svg>
-                );
-              }}
+              shape={renderCrossoverMarker}
             />
           )}
         </LineChart>

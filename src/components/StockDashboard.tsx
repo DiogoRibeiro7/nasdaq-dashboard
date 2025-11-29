@@ -40,6 +40,7 @@ import type {
   HigherMoments,
   RollingCorrelationPoint,
   CapmStats,
+  BacktestResult,
 } from "@/lib/stats";
 import { MultiStockSelector } from "@/components/MultiStockSelector";
 import { MultiStockChart } from "@/components/MultiStockChart";
@@ -113,13 +114,13 @@ function sanitizeLongWindow(value: number, currentShort: number): number {
   return Math.max(minAllowed, Math.trunc(value));
 }
 
-const EMPTY_BACKTEST_RESULT = {
+const EMPTY_BACKTEST_RESULT: BacktestResult = {
   trades: [],
   equityCurve: [],
   totalReturn: 0,
   maxDrawdown: 0,
   cagr: null,
-} as const;
+};
 
 /**
  * Extracts an error message from an API response body.

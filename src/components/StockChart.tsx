@@ -10,6 +10,7 @@ import {
   Tooltip,
   XAxis,
   YAxis,
+  type TooltipProps,
 } from "recharts";
 import type { ChartPoint } from "@/lib/types";
 import type { GapEvent, VolumeSpikeEvent } from "@/lib/stats";
@@ -110,11 +111,7 @@ export function StockChart({
     active,
     payload,
     label,
-  }: {
-    active?: boolean;
-    payload?: Array<{ dataKey?: string; value?: number }>;
-    label?: string;
-  }) => {
+  }: TooltipProps<number, string>): JSX.Element | null => {
     if (!active || !payload || payload.length === 0 || !label) {
       return null;
     }
