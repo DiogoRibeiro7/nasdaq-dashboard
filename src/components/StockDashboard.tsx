@@ -69,6 +69,8 @@ import { MacdChart } from "@/components/MacdChart";
 import { RegimeTimeline } from "@/components/RegimeTimeline";
 import { PortfolioChart } from "@/components/PortfolioChart";
 import { PortfolioStatsPanel } from "@/components/PortfolioStatsPanel";
+import { EfficientFrontierChart } from "@/components/EfficientFrontierChart";
+import { PortfolioWeightsTable } from "@/components/PortfolioWeightsTable";
 import { StrategyComparisonTable } from "@/components/StrategyComparisonTable";
 import { AcfChart } from "@/components/AcfChart";
 import { LjungBoxTable } from "@/components/LjungBoxTable";
@@ -109,6 +111,13 @@ import {
   generateRsiBandSignals,
 } from "@/lib/analytics/backtest";
 import { computeVarEs } from "@/lib/analytics/risk";
+import {
+  computeEfficientFrontier,
+  findMaxSharpePortfolio,
+  findMinVariancePortfolio,
+  type FrontierPoint,
+  type OptimisationInputs,
+} from "@/lib/analytics/portfolio_opt";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper Functions
@@ -132,6 +141,34 @@ function filterByRange(
   if (series.length <= days) return series;
 
   return series.slice(series.length - days);
+}
+
+function formatPercentOrDash(
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  return formatPercent(value);
+}
+
+function formatNumberOrDash(
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "—";
+  }
+  return formatAxisNumber(value);
+}
+
+function computePointSharpe(
+  point: FrontierPoint | null,
+  riskFreeRate: number,
+): number | null {
+  if (!point || point.volatility <= 0) {
+    return null;
+  }
+  return (point.expectedReturn - riskFreeRate) / point.volatility;
 }
 
 function sanitizeShortWindow(value: number, currentLong: number): number {
@@ -1090,6 +1127,65 @@ export function StockDashboard(): JSX.Element {
     () => computeVarEs(portfolioLogReturns, tailHorizon, tailConfidence),
     [portfolioLogReturns, tailHorizon, tailConfidence],
   );
+
+  const optimisationInput = useMemo<OptimisationInputs | null>(() => {
+    if (multiState.status !== "success" || multiSymbols.length < 2) {
+      return null;
+    }
+
+    const returnsBySymbol: Record<string, DatedReturn[]> = {};
+    const usableSymbols: string[] = [];
+
+    for (const sym of multiSymbols) {
+      const stock = multiState.data[sym];
+      if (!stock) continue;
+      const filteredSeries = filterByRange(stock.series, range);
+      if (filteredSeries.length < 2) continue;
+      const returns = getDailyLogReturns(filteredSeries);
+      if (returns.length === 0) continue;
+      returnsBySymbol[sym] = returns;
+      usableSymbols.push(sym);
+    }
+
+    return usableSymbols.length >= 2
+      ? { symbols: usableSymbols, returnsBySymbol }
+      : null;
+  }, [multiState, multiSymbols, range]);
+
+  const optimisationResults = useMemo<{
+    frontier: FrontierPoint[];
+    minVar: FrontierPoint | null;
+    maxSharpe: FrontierPoint | null;
+  }>(() => {
+    if (!optimisationInput) {
+      return { frontier: [], minVar: null, maxSharpe: null };
+    }
+    const frontier = computeEfficientFrontier(
+      optimisationInput,
+      DEFAULT_OPTIMISATION_POINTS,
+      { riskFreeRateAnnual: DEFAULT_RISK_FREE_RATE_ANNUAL },
+    );
+    return {
+      frontier,
+      minVar: findMinVariancePortfolio(frontier),
+      maxSharpe: findMaxSharpePortfolio(
+        frontier,
+        DEFAULT_RISK_FREE_RATE_ANNUAL,
+      ),
+    };
+  }, [optimisationInput]);
+
+  const optimisationSymbols = optimisationInput?.symbols ?? [];
+  const minVarSharpe = useMemo(
+    () => computePointSharpe(optimisationResults.minVar, DEFAULT_RISK_FREE_RATE_ANNUAL),
+    [optimisationResults.minVar],
+  );
+  const maxSharpeRatio = useMemo(
+    () => computePointSharpe(optimisationResults.maxSharpe, DEFAULT_RISK_FREE_RATE_ANNUAL),
+    [optimisationResults.maxSharpe],
+  );
+  const optimisationUniverseSize =
+    optimisationSymbols.length > 0 ? optimisationSymbols.length : multiSymbols.length;
 
   // Compute correlation matrix from multi-stock data
   const correlationMatrix = useMemo((): CorrelationMatrix | null => {
@@ -2426,6 +2522,118 @@ export function StockDashboard(): JSX.Element {
         </section>
       )}
 
+      {multiSymbols.length >= 2 && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-4">
+            <h2 className="text-base font-medium text-neutral-200">
+              Portfolio optimisation (mean-variance)
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Long-only grid search across up to {optimisationUniverseSize} symbols. Risk-free
+              rate assumed at {formatPercentOrDash(DEFAULT_RISK_FREE_RATE_ANNUAL)} for Sharpe
+              calculations.
+            </p>
+          </div>
+          {isMultiLoading ? (
+            <div className="flex h-64 items-center justify-center text-sm text-neutral-500">
+              Crunching optimisation grid
+            </div>
+          ) : optimisationResults.frontier.length === 0 ? (
+            <div className="rounded-2xl border border-neutral-800 bg-neutral-950/60 p-5 text-sm text-neutral-400">
+              Need overlapping daily return history for at least two of the selected tickers.
+            </div>
+          ) : (
+            <>
+              <EfficientFrontierChart
+                frontier={optimisationResults.frontier}
+                minVar={optimisationResults.minVar}
+                maxSharpe={optimisationResults.maxSharpe}
+              />
+              <div className="mt-6 grid gap-4 lg:grid-cols-2">
+                <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-neutral-100">
+                        Min-variance portfolio
+                      </div>
+                      <p className="text-xs text-neutral-500">
+                        Lowest annualised volatility on the frontier.
+                      </p>
+                    </div>
+                  </div>
+                  <dl className="mt-4 grid grid-cols-2 gap-3 text-xs text-neutral-300">
+                    <div>
+                      <dt className="text-neutral-500">Expected return</dt>
+                      <dd className="font-semibold text-neutral-100">
+                        {formatPercentOrDash(optimisationResults.minVar?.expectedReturn)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-neutral-500">Volatility</dt>
+                      <dd className="font-semibold text-neutral-100">
+                        {formatPercentOrDash(optimisationResults.minVar?.volatility)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-neutral-500">Sharpe</dt>
+                      <dd className="font-semibold text-neutral-100">
+                        {formatNumberOrDash(minVarSharpe)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="mt-4">
+                    <PortfolioWeightsTable
+                      point={optimisationResults.minVar}
+                      symbols={optimisationSymbols}
+                      title="Weights"
+                    />
+                  </div>
+                </div>
+                <div className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-neutral-100">
+                        Max-Sharpe portfolio
+                      </div>
+                      <p className="text-xs text-neutral-500">
+                        Highest excess return per unit of risk vs. {formatPercentOrDash(DEFAULT_RISK_FREE_RATE_ANNUAL)}.
+                      </p>
+                    </div>
+                  </div>
+                  <dl className="mt-4 grid grid-cols-2 gap-3 text-xs text-neutral-300">
+                    <div>
+                      <dt className="text-neutral-500">Expected return</dt>
+                      <dd className="font-semibold text-neutral-100">
+                        {formatPercentOrDash(optimisationResults.maxSharpe?.expectedReturn)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-neutral-500">Volatility</dt>
+                      <dd className="font-semibold text-neutral-100">
+                        {formatPercentOrDash(optimisationResults.maxSharpe?.volatility)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-neutral-500">Sharpe</dt>
+                      <dd className="font-semibold text-neutral-100">
+                        {formatNumberOrDash(maxSharpeRatio)}
+                      </dd>
+                    </div>
+                  </dl>
+                  <div className="mt-4">
+                    <PortfolioWeightsTable
+                      point={optimisationResults.maxSharpe}
+                      symbols={optimisationSymbols}
+                      title="Weights"
+                    />
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
       {/* Rolling Correlations Section - Only show when 2+ symbols selected */}
       {multiSymbols.length >= 2 && rollingCorrelations.length > 0 && (
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
@@ -2489,6 +2697,8 @@ export function StockDashboard(): JSX.Element {
     </div>
   );
 }
+const DEFAULT_OPTIMISATION_POINTS = 80;
+const DEFAULT_RISK_FREE_RATE_ANNUAL = 0.02;
 const DEFAULT_SHORT_WINDOW = 20;
 const DEFAULT_LONG_WINDOW = 50;
 const MIN_MA_WINDOW = 2;
