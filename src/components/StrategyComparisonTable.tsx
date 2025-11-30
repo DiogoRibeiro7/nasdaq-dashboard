@@ -1,20 +1,24 @@
 "use client";
 
 import type { JSX } from "react";
-import { formatPercent } from "@/lib/format";
-import type { BacktestResult } from "@/lib/stats";
+import { formatAxisNumber, formatPercent } from "@/lib/format";
+
+export type StrategyComparisonRow = {
+  name: string;
+  totalReturn: number | null;
+  maxDrawdown: number | null;
+  cagr: number | null;
+  hitRate: number | null;
+};
 
 export type StrategyComparisonTableProps = {
-  strategies: Array<{
-    name: string;
-    result: BacktestResult;
-  }>;
+  rows: StrategyComparisonRow[];
 };
 
 export function StrategyComparisonTable({
-  strategies,
+  rows,
 }: StrategyComparisonTableProps): JSX.Element | null {
-  if (strategies.length === 0) {
+  if (rows.length === 0) {
     return null;
   }
 
@@ -27,24 +31,32 @@ export function StrategyComparisonTable({
             <th className="px-3 py-2 text-right font-medium">Total Return</th>
             <th className="px-3 py-2 text-right font-medium">Max Drawdown</th>
             <th className="px-3 py-2 text-right font-medium">CAGR</th>
-            <th className="px-3 py-2 text-right font-medium">Sharpe</th>
+            <th className="px-3 py-2 text-right font-medium">Hit rate</th>
           </tr>
         </thead>
         <tbody>
-          {strategies.map(({ name, result }) => (
-            <tr key={name} className="border-t border-neutral-800">
-              <td className="px-3 py-2 font-semibold text-neutral-100">{name}</td>
-              <td className="px-3 py-2 text-right">
-                {formatPercent(result.totalReturn)}
+          {rows.map((row) => (
+            <tr key={row.name} className="border-t border-neutral-800">
+              <td className="px-3 py-2 font-semibold text-neutral-100">
+                {row.name}
               </td>
               <td className="px-3 py-2 text-right">
-                {formatPercent(result.maxDrawdown)}
+                {row.totalReturn !== null
+                  ? formatPercent(row.totalReturn)
+                  : "—"}
               </td>
               <td className="px-3 py-2 text-right">
-                {result.cagr !== null ? formatPercent(result.cagr) : "—"}
+                {row.maxDrawdown !== null
+                  ? formatPercent(row.maxDrawdown)
+                  : "—"}
               </td>
               <td className="px-3 py-2 text-right">
-                {"—"}
+                {row.cagr !== null ? formatPercent(row.cagr) : "—"}
+              </td>
+              <td className="px-3 py-2 text-right">
+                {row.hitRate !== null
+                  ? formatPercent(row.hitRate)
+                  : "—"}
               </td>
             </tr>
           ))}

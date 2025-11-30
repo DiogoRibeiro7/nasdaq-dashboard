@@ -670,26 +670,39 @@ describe("detectVolumeSpikes", () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("computeMovingAverage", () => {
-  it("should compute SMA aligned to first complete window", () => {
+  it("returns null until the window is filled", () => {
     const series = createSeries([10, 20, 30, 40, 50]).map(({ date, close }) => ({
       date,
       close,
     }));
     const ma = computeMovingAverage(series, 3);
 
-    expect(ma).toHaveLength(3);
-    expect(ma[0]).toEqual({ date: series[2].date, ma: 20 });
-    expect(ma[2].ma).toBeCloseTo((30 + 40 + 50) / 3, 5);
+    expect(ma).toHaveLength(series.length);
+    expect(ma[0]).toEqual({ date: series[0].date, ma: null });
+    expect(ma[1]).toEqual({ date: series[1].date, ma: null });
+    expect(ma[2].ma).toBeCloseTo((10 + 20 + 30) / 3, 5);
+    expect(ma[4].ma).toBeCloseTo((30 + 40 + 50) / 3, 5);
   });
 
-  it("should return empty array when window larger than series", () => {
+  it("returns all nulls when there is insufficient history", () => {
     const series = createSeries([10, 20]).map(({ date, close }) => ({
       date,
       close,
     }));
     const ma = computeMovingAverage(series, 5);
 
-    expect(ma).toEqual([]);
+    expect(ma).toEqual([
+      { date: series[0].date, ma: null },
+      { date: series[1].date, ma: null },
+    ]);
+  });
+
+  it("returns empty array for non-positive windows", () => {
+    const series = createSeries([10, 20, 30]).map(({ date, close }) => ({
+      date,
+      close,
+    }));
+    expect(computeMovingAverage(series, 0)).toEqual([]);
   });
 });
 
@@ -712,11 +725,11 @@ describe("computeDualMovingAverages", () => {
 describe("detectMovingAverageCrossovers", () => {
   it("should detect golden and death crosses", () => {
     const data = [
-      { date: "2024-01-01", maShort: null, maLong: null },
-      { date: "2024-01-02", maShort: 9, maLong: 10 },
-      { date: "2024-01-03", maShort: 11, maLong: 10 },
-      { date: "2024-01-04", maShort: 12, maLong: 11 },
-      { date: "2024-01-05", maShort: 10, maLong: 11 },
+      { date: "2024-01-01", close: 100, maShort: null, maLong: null },
+      { date: "2024-01-02", close: 101, maShort: 9, maLong: 10 },
+      { date: "2024-01-03", close: 102, maShort: 11, maLong: 10 },
+      { date: "2024-01-04", close: 99, maShort: 12, maLong: 11 },
+      { date: "2024-01-05", close: 98, maShort: 10, maLong: 11 },
     ];
 
     const events = detectMovingAverageCrossovers(data);

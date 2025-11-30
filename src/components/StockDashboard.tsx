@@ -1,7 +1,7 @@
 "use client";
 
 import type { JSX } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { StockSelector } from "@/components/StockSelector";
 import { StockChart } from "@/components/StockChart";
 import { StatsCards } from "@/components/StatsCards";
@@ -28,9 +28,14 @@ import {
   classifyRegimes,
   computePortfolioSeries,
   computePortfolioMetrics,
+  computeAcf,
+  computeLjungBox,
+  computeDayOfWeekSeasonality,
+  computeMonthOfYearSeasonality,
 } from "@/lib/stats";
-import type { PortfolioPoint } from "@/lib/stats";
+import { forecastPrices, type ForecastModelType } from "@/lib/analytics/forecast";
 import type {
+  PortfolioPoint,
   CorrelationMatrix,
   RollingVolatilityPoint,
   RollingReturnPoint,
@@ -41,6 +46,10 @@ import type {
   RollingCorrelationPoint,
   CapmStats,
   BacktestResult,
+  PricePoint,
+  CalendarBucketStats,
+  CrossSectionMetrics,
+  DatedReturn,
 } from "@/lib/stats";
 import { MultiStockSelector } from "@/components/MultiStockSelector";
 import { MultiStockChart } from "@/components/MultiStockChart";
@@ -61,6 +70,16 @@ import { RegimeTimeline } from "@/components/RegimeTimeline";
 import { PortfolioChart } from "@/components/PortfolioChart";
 import { PortfolioStatsPanel } from "@/components/PortfolioStatsPanel";
 import { StrategyComparisonTable } from "@/components/StrategyComparisonTable";
+import { AcfChart } from "@/components/AcfChart";
+import { LjungBoxTable } from "@/components/LjungBoxTable";
+import { SeasonalityBars } from "@/components/SeasonalityBars";
+import { GlossaryTooltip } from "@/components/GlossaryTooltip";
+import { GlossaryPanel } from "@/components/GlossaryPanel";
+import { CrossSectionTable } from "@/components/CrossSectionTable";
+import { ForecastChart } from "@/components/ForecastChart";
+import { VarEsPanel } from "@/components/VarEsPanel";
+import { PcaExplainedVarianceChart } from "@/components/PcaExplainedVarianceChart";
+import { PcaLoadingsTable } from "@/components/PcaLoadingsTable";
 import type {
   ChartPoint,
   FetchState,
@@ -71,12 +90,25 @@ import type {
   TimeRange,
 } from "@/lib/types";
 import { TIME_RANGE_DAYS } from "@/lib/types";
-import { formatAxisNumber } from "@/lib/format";
+import { formatAxisNumber, formatPercent } from "@/lib/format";
 import {
   DEFAULT_BENCHMARK_SYMBOL,
   getSymbolDisplayName,
+  NASDAQ_STOCKS,
 } from "@/lib/stocks";
 import { useDashboardSearchParams } from "@/lib/useDashboardSearchParams";
+import {
+  computeCrossSectionMetrics,
+  type SymbolSeriesMap,
+} from "@/lib/crossSection";
+import { computeReturnPca, type PcaResult } from "@/lib/analytics/pca";
+import {
+  backtestSignals,
+  generateMaCrossoverSignals,
+  generateRegimeFilterSignals,
+  generateRsiBandSignals,
+} from "@/lib/analytics/backtest";
+import { computeVarEs } from "@/lib/analytics/risk";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper Functions
@@ -104,14 +136,18 @@ function filterByRange(
 
 function sanitizeShortWindow(value: number, currentLong: number): number {
   if (!Number.isFinite(value)) return DEFAULT_SHORT_WINDOW;
-  const maxAllowed = Math.max(MIN_MA_WINDOW, currentLong - 1);
+  const maxAllowed = Math.max(
+    MIN_MA_WINDOW,
+    Math.min(currentLong - 1, MAX_MA_WINDOW - 1),
+  );
   return Math.min(Math.max(MIN_MA_WINDOW, Math.trunc(value)), maxAllowed);
 }
 
 function sanitizeLongWindow(value: number, currentShort: number): number {
   if (!Number.isFinite(value)) return DEFAULT_LONG_WINDOW;
   const minAllowed = Math.max(currentShort + 1, MIN_MA_WINDOW + 1);
-  return Math.max(minAllowed, Math.trunc(value));
+  const clamped = Math.max(minAllowed, Math.trunc(value));
+  return Math.min(clamped, MAX_MA_WINDOW);
 }
 
 const EMPTY_BACKTEST_RESULT: BacktestResult = {
@@ -121,6 +157,8 @@ const EMPTY_BACKTEST_RESULT: BacktestResult = {
   maxDrawdown: 0,
   cagr: null,
 };
+
+const MAX_MA_WINDOW = 250;
 
 /**
  * Extracts an error message from an API response body.
@@ -197,6 +235,15 @@ function buildAnalyticsSnapshot({
     priceSeries: rangeSeries,
   };
 }
+
+type ScreenerState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; error: string }
+  | {
+      status: "success";
+      data: { metrics: CrossSectionMetrics[]; pca: PcaResult | null };
+    };
 
 type CsvBuildContext = {
   rangeSeries: StockTimeSeriesPoint[];
@@ -302,7 +349,7 @@ const EMPTY_CAPM_STATS: CapmStats = {
  *
  * Features:
  * - Single stock selection with price chart and statistics
- * - Configurable time range (1M, 3M, 6M, 1Y, MAX)
+ * - Configurable time range (5D, 10D, 1M, 3M, 6M, 1Y, MAX)
  * - Multi-stock comparison with normalized relative performance
  *
  * Data is fetched from the internal `/api/stocks/[symbol]` endpoint.
@@ -350,13 +397,29 @@ export function StockDashboard(): JSX.Element {
   const [volumeZThreshold, setVolumeZThreshold] = useState(2);
 
   // Moving average window state for trend analysis
-  const [maShortWindow, setMaShortWindow] = useState(DEFAULT_SHORT_WINDOW);
-  const [maLongWindow, setMaLongWindow] = useState(DEFAULT_LONG_WINDOW);
+  const [shortWindow, setShortWindow] = useState(DEFAULT_SHORT_WINDOW);
+  const [longWindow, setLongWindow] = useState(DEFAULT_LONG_WINDOW);
   const [rsiPeriod, setRsiPeriod] = useState(DEFAULT_RSI_PERIOD);
   const [macdFast, setMacdFast] = useState(DEFAULT_MACD_FAST);
   const [macdSlow, setMacdSlow] = useState(DEFAULT_MACD_SLOW);
   const [macdSignal, setMacdSignal] = useState(DEFAULT_MACD_SIGNAL);
   const [volThresholdHigh, setVolThresholdHigh] = useState(0.35);
+  const [screenerState, setScreenerState] = useState<ScreenerState>({
+    status: "idle",
+  });
+  const [screenerSort, setScreenerSort] = useState<{
+    key: keyof CrossSectionMetrics;
+    dir: "asc" | "desc";
+  }>({
+    key: "return3M",
+    dir: "desc",
+  });
+  const [screenerTopN, setScreenerTopN] = useState(10);
+  const [forecastModel, setForecastModel] =
+    useState<ForecastModelType>("naive");
+  const [forecastHorizon, setForecastHorizon] = useState(10);
+  const [tailConfidence, setTailConfidence] = useState(0.95);
+  const [tailHorizon, setTailHorizon] = useState(1);
 
   // ───────────────────────────────────────────────────────────────────────────
   // Data Fetching
@@ -521,6 +584,20 @@ export function StockDashboard(): JSX.Element {
     };
   }, [singleState, range]);
 
+  const priceSeries = useMemo<PricePoint[]>(() => {
+    if (rangeSeries.length === 0) {
+      return [];
+    }
+
+    return rangeSeries.map((point) => ({
+      date: point.date,
+      close: point.close,
+    }));
+  }, [rangeSeries]);
+
+  const insufficientMaData =
+    priceSeries.length > 0 && priceSeries.length < longWindow;
+
   // Compute advanced analytics (rolling volatility, returns, drawdown)
   const advancedAnalytics = useMemo(() => {
     if (rangeSeries.length === 0) {
@@ -561,6 +638,77 @@ export function StockDashboard(): JSX.Element {
     };
   }, [rangeSeries]);
 
+  const dailyReturnCount = returnDistribution.dailyReturns.length;
+
+  const acfReturns = useMemo(
+    () => computeAcf(returnDistribution.dailyReturns, 20),
+    [returnDistribution.dailyReturns],
+  );
+
+  const acfAbsReturns = useMemo(() => {
+    const transformed = returnDistribution.dailyReturns.map((point) => ({
+      date: point.date,
+      r: Math.abs(point.r),
+    }));
+    return computeAcf(transformed, 20);
+  }, [returnDistribution.dailyReturns]);
+
+  const ljungBoxResults = useMemo(
+    () => computeLjungBox(returnDistribution.dailyReturns, 20),
+    [returnDistribution.dailyReturns],
+  );
+
+  const serialDependenceSummary = useMemo(() => {
+    const hasReturnAutocorr = acfReturns
+      .filter((point) => point.lag > 0 && point.lag <= 5)
+      .some((point) => Math.abs(point.value) > 0.2);
+
+    const hasVolClustering = acfAbsReturns
+      .filter((point) => point.lag > 0 && point.lag <= 5)
+      .some((point) => point.value > 0.2);
+
+    const hasSignificantLjung =
+      ljungBoxResults.some(
+        (result) => result.pValue !== null && result.pValue < 0.05,
+      );
+
+    if (hasSignificantLjung || hasVolClustering) {
+      return "Autocorrelation tests flag potential volatility clustering at low lags.";
+    }
+    if (hasReturnAutocorr) {
+      return "Returns show modest autocorrelation at short horizons.";
+    }
+    return "No strong evidence of serial dependence in the selected range.";
+  }, [acfReturns, acfAbsReturns, ljungBoxResults]);
+
+  const screenerRows = useMemo(() => {
+    if (screenerState.status !== "success") {
+      return [];
+    }
+    const rows = [...screenerState.data.metrics];
+    const dirFactor = screenerSort.dir === "asc" ? 1 : -1;
+    rows.sort((a, b) => {
+      const aValue = a[screenerSort.key];
+      const bValue = b[screenerSort.key];
+      if (typeof aValue === "string" && typeof bValue === "string") {
+        return aValue.localeCompare(bValue) * dirFactor;
+      }
+      const normalizeNumeric = (value: unknown): number =>
+        typeof value === "number" && Number.isFinite(value)
+          ? value
+          : screenerSort.dir === "asc"
+          ? Number.POSITIVE_INFINITY
+          : Number.NEGATIVE_INFINITY;
+      const aNum = normalizeNumeric(aValue);
+      const bNum = normalizeNumeric(bValue);
+      if (aNum === bNum) {
+        return 0;
+      }
+      return aNum > bNum ? dirFactor : -dirFactor;
+    });
+    return rows.slice(0, Math.min(screenerTopN, rows.length));
+  }, [screenerState, screenerSort, screenerTopN]);
+
   // Detect gap and volume spike events on the filtered series
   const events = useMemo(() => {
     if (rangeSeries.length === 0) {
@@ -574,63 +722,67 @@ export function StockDashboard(): JSX.Element {
   }, [rangeSeries, gapThreshold, volumeZThreshold]);
 
   const maSeries = useMemo(() => {
-    if (rangeSeries.length === 0) {
+    if (priceSeries.length === 0 || insufficientMaData) {
       return [];
     }
 
-    const mappedSeries = rangeSeries.map((point) => ({
-      date: point.date,
-      close: point.close,
-    }));
-
-    return computeDualMovingAverages(
-      mappedSeries,
-      maShortWindow,
-      maLongWindow,
-    );
-  }, [rangeSeries, maShortWindow, maLongWindow]);
+    return computeDualMovingAverages(priceSeries, shortWindow, longWindow);
+  }, [priceSeries, shortWindow, longWindow, insufficientMaData]);
 
   const maCrossovers = useMemo(
     () => detectMovingAverageCrossovers(maSeries),
     [maSeries],
   );
+  const crossoverCounts = useMemo(() => {
+    let golden = 0;
+    let death = 0;
+    for (const event of maCrossovers) {
+      if (event.type === "golden") {
+        golden += 1;
+      } else {
+        death += 1;
+      }
+    }
+    return { golden, death };
+  }, [maCrossovers]);
 
   const rsiData = useMemo(() => {
-    if (rangeSeries.length === 0) {
+    if (priceSeries.length === 0) {
       return [];
     }
 
-    const mappedSeries = rangeSeries.map((point) => ({
-      date: point.date,
-      close: point.close,
-    }));
-
-    return computeRsi(mappedSeries, rsiPeriod);
-  }, [rangeSeries, rsiPeriod]);
+    return computeRsi(priceSeries, rsiPeriod);
+  }, [priceSeries, rsiPeriod]);
 
   const macdData = useMemo(() => {
-    if (rangeSeries.length === 0) {
+    if (priceSeries.length === 0) {
       return [];
     }
 
-    const mappedSeries = rangeSeries.map((point) => ({
-      date: point.date,
-      close: point.close,
-    }));
+    return computeMacd(priceSeries, macdFast, macdSlow, macdSignal);
+  }, [priceSeries, macdFast, macdSlow, macdSignal]);
 
-    return computeMacd(mappedSeries, macdFast, macdSlow, macdSignal);
-  }, [rangeSeries, macdFast, macdSlow, macdSignal]);
+  const dayOfWeekSeasonality = useMemo<CalendarBucketStats[]>(() => {
+    if (returnDistribution.dailyReturns.length === 0) {
+      return [];
+    }
+    return computeDayOfWeekSeasonality(returnDistribution.dailyReturns);
+  }, [returnDistribution.dailyReturns]);
+
+  const monthOfYearSeasonality = useMemo<CalendarBucketStats[]>(() => {
+    if (returnDistribution.dailyReturns.length === 0) {
+      return [];
+    }
+    return computeMonthOfYearSeasonality(returnDistribution.dailyReturns);
+  }, [returnDistribution.dailyReturns]);
 
   const regimeData = useMemo(() => {
-    if (rangeSeries.length === 0) {
+    if (priceSeries.length === 0) {
       return [];
     }
 
     return classifyRegimes({
-      closeSeries: rangeSeries.map((point) => ({
-        date: point.date,
-        close: point.close,
-      })),
+      closeSeries: priceSeries,
       maShortSeries: maSeries.map((point) => ({
         date: point.date,
         ma: point.maShort,
@@ -646,61 +798,114 @@ export function StockDashboard(): JSX.Element {
       })),
       volThresholdHigh,
     });
-  }, [rangeSeries, maSeries, rsiData, advancedAnalytics.rollingVol21, volThresholdHigh]);
+  }, [priceSeries, maSeries, rsiData, advancedAnalytics.rollingVol21, volThresholdHigh]);
+
+  const maSignalBacktest = useMemo(() => {
+    if (priceSeries.length === 0 || maSeries.length === 0) {
+      return null;
+    }
+    const signals = generateMaCrossoverSignals(maSeries);
+    return backtestSignals(priceSeries, signals);
+  }, [priceSeries, maSeries]);
+
+  const rsiSignalBacktest = useMemo(() => {
+    if (priceSeries.length === 0 || rsiData.length === 0) {
+      return null;
+    }
+    const signals = generateRsiBandSignals(rsiData, 30, 70);
+    return backtestSignals(priceSeries, signals);
+  }, [priceSeries, rsiData]);
+
+  const regimeSignalBacktest = useMemo(() => {
+    if (priceSeries.length === 0 || regimeData.length === 0) {
+      return null;
+    }
+    const signals = generateRegimeFilterSignals(regimeData);
+    return backtestSignals(priceSeries, signals);
+  }, [priceSeries, regimeData]);
+
+  const forecastPoints = useMemo(() => {
+    if (priceSeries.length === 0) {
+      return [];
+    }
+    return forecastPrices(priceSeries, forecastHorizon, forecastModel);
+  }, [priceSeries, forecastHorizon, forecastModel]);
+
+  const stockVarEs = useMemo(
+    () => computeVarEs(returnDistribution.dailyReturns, tailHorizon, tailConfidence),
+    [returnDistribution.dailyReturns, tailHorizon, tailConfidence],
+  );
+
+  const pcaResult = screenerState.status === "success" ? screenerState.data.pca : null;
 
   const maBacktest = useMemo(() => {
-    if (rangeSeries.length === 0) {
+    if (priceSeries.length === 0 || insufficientMaData) {
       return EMPTY_BACKTEST_RESULT;
     }
 
-    const mappedSeries = rangeSeries.map((point) => ({
-      date: point.date,
-      close: point.close,
-    }));
-
-    return backtestMaCrossoverStrategy(mappedSeries, maCrossovers);
-  }, [rangeSeries, maCrossovers]);
+    return backtestMaCrossoverStrategy(priceSeries, maCrossovers);
+  }, [priceSeries, maCrossovers, insufficientMaData]);
 
   const buyAndHoldBacktest = useMemo(() => {
-    if (rangeSeries.length === 0) {
+    if (priceSeries.length === 0) {
       return EMPTY_BACKTEST_RESULT;
     }
 
-    const mappedSeries = rangeSeries.map((point) => ({
-      date: point.date,
-      close: point.close,
-    }));
-    return backtestBuyAndHold(mappedSeries);
-  }, [rangeSeries]);
+    return backtestBuyAndHold(priceSeries);
+  }, [priceSeries]);
 
-  const cashBaseline = useMemo(() => {
-    if (rangeSeries.length === 0) {
-      return EMPTY_BACKTEST_RESULT;
-    }
+  const strategyComparisonRows = useMemo(() => {
+    const rows: {
+      name: string;
+      totalReturn: number | null;
+      maxDrawdown: number | null;
+      cagr: number | null;
+      hitRate: number | null;
+    }[] = [];
 
-    const equityCurve = rangeSeries.map((point) => ({
-      date: point.date,
-      equity: 1,
-      drawdown: 0,
-    }));
-
-    return {
-      trades: [],
-      equityCurve,
-      totalReturn: 0,
-      maxDrawdown: 0,
-      cagr: null,
+    const buildFromBacktestResult = (name: string, result: BacktestResult) => {
+      rows.push({
+        name,
+        totalReturn: result.totalReturn,
+        maxDrawdown: result.maxDrawdown,
+        cagr: result.cagr,
+        hitRate:
+          result.trades.length > 0
+            ? result.trades.filter(
+                (trade) => trade.return !== null && trade.return > 0,
+              ).length / result.trades.length
+            : null,
+      });
     };
-  }, [rangeSeries]);
 
-  const strategyComparison = useMemo(
-    () => [
-      { name: "Buy & hold", result: buyAndHoldBacktest },
-      { name: "MA crossover", result: maBacktest },
-      { name: "Cash (no trades)", result: cashBaseline },
-    ],
-    [buyAndHoldBacktest, maBacktest, cashBaseline],
-  );
+    const buildFromGeneric = (
+      name: string,
+      result: ReturnType<typeof backtestSignals> | null,
+    ) => {
+      if (!result) {
+        return;
+      }
+      rows.push({
+        name,
+        totalReturn: result.totalReturn,
+        maxDrawdown: result.maxDrawdown,
+        cagr: result.cagr,
+        hitRate: result.hitRate,
+      });
+    };
+
+    buildFromBacktestResult("Buy & hold", buyAndHoldBacktest);
+    buildFromGeneric("MA crossover (signals)", maSignalBacktest);
+    buildFromGeneric("RSI bands (30/70)", rsiSignalBacktest);
+    buildFromGeneric("Regime filter (uptrend only)", regimeSignalBacktest);
+
+    return rows;
+  }, [
+    buyAndHoldBacktest,
+    maSignalBacktest,
+    rsiSignalBacktest,
+    regimeSignalBacktest,
+  ]);
 
   const recentCrossovers = useMemo(() => {
     const sorted = [...maCrossovers].sort((a, b) =>
@@ -863,6 +1068,29 @@ export function StockDashboard(): JSX.Element {
     return { series, metrics };
   }, [multiState, multiSymbols, range]);
 
+  const portfolioLogReturns = useMemo(() => {
+    if (portfolioData.series.length < 2) {
+      return [];
+    }
+    const returns: DatedReturn[] = [];
+    for (let i = 1; i < portfolioData.series.length; i++) {
+      const prev = portfolioData.series[i - 1].close;
+      const curr = portfolioData.series[i].close;
+      if (prev > 0 && curr > 0) {
+        returns.push({
+          date: portfolioData.series[i].date,
+          r: Math.log(curr / prev),
+        });
+      }
+    }
+    return returns;
+  }, [portfolioData.series]);
+
+  const portfolioVarEs = useMemo(
+    () => computeVarEs(portfolioLogReturns, tailHorizon, tailConfidence),
+    [portfolioLogReturns, tailHorizon, tailConfidence],
+  );
+
   // Compute correlation matrix from multi-stock data
   const correlationMatrix = useMemo((): CorrelationMatrix | null => {
     if (multiState.status !== "success") {
@@ -997,26 +1225,81 @@ export function StockDashboard(): JSX.Element {
   };
 
   const handleShortWindowChange = (value: number): void => {
-    setMaShortWindow((currentShort) => {
-      const sanitized = sanitizeShortWindow(value, maLongWindow);
+    setShortWindow((currentShort) => {
+      const sanitized = sanitizeShortWindow(value, longWindow);
       return sanitized !== currentShort ? sanitized : currentShort;
     });
   };
 
   const handleLongWindowChange = (value: number): void => {
-    setMaLongWindow((currentLong) => {
-      const sanitized = sanitizeLongWindow(value, maShortWindow);
+    setLongWindow((currentLong) => {
+      const sanitized = sanitizeLongWindow(value, shortWindow);
       return sanitized !== currentLong ? sanitized : currentLong;
     });
   };
+
+  const handleLoadScreener = useCallback(async () => {
+    setScreenerState({ status: "loading" });
+    try {
+      const responses = await Promise.all(
+        NASDAQ_STOCKS.map(async ({ symbol }) => {
+          const response = await fetch(`/api/stocks/${symbol}`);
+          if (!response.ok) {
+            const errorMessage = await extractErrorMessage(response);
+            throw new Error(errorMessage);
+          }
+          const data = (await response.json()) as StockApiResponse;
+          const simplified = data.series.map((point) => ({
+            date: point.date,
+            close: point.close,
+          }));
+          return [symbol, simplified] as const;
+        }),
+      );
+
+      const seriesBySymbol: SymbolSeriesMap = {};
+      for (const [symbol, simplified] of responses) {
+        seriesBySymbol[symbol] = simplified;
+      }
+
+      const metrics = computeCrossSectionMetrics(seriesBySymbol);
+      const pca = computeReturnPca(seriesBySymbol);
+      setScreenerState({
+        status: "success",
+        data: { metrics, pca },
+      });
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to load screener data. Please try again.";
+      setScreenerState({ status: "error", error: message });
+    }
+  }, []);
+
+  const handleScreenerSortChange = useCallback(
+    (key: keyof CrossSectionMetrics) => {
+      setScreenerSort((prev) => {
+        if (prev.key === key) {
+          return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
+        }
+        return { key, dir: key === "symbol" ? "asc" : "desc" };
+      });
+    },
+    [],
+  );
 
   // ───────────────────────────────────────────────────────────────────────────
   // Render
   // ───────────────────────────────────────────────────────────────────────────
 
-  const timeRangeOptions: TimeRange[] = ["1M", "3M", "6M", "1Y", "MAX"];
+  const timeRangeOptions: TimeRange[] = ["5D", "10D", "1M", "3M", "6M", "1Y", "MAX"];
   const gapThresholdOptions = [0.02, 0.03, 0.05, 0.08];
   const volumeThresholdOptions = [1.5, 2, 2.5, 3];
+  const screenerTopNOptions = [5, 10, 15, NASDAQ_STOCKS.length];
+  const forecastHorizonOptions = [5, 10, 20];
+  const tailHorizonOptions = [1, 5, 10];
+  const tailConfidenceOptions = [0.9, 0.95, 0.99];
 
   return (
     <div className="flex flex-col gap-6">
@@ -1102,11 +1385,14 @@ export function StockDashboard(): JSX.Element {
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-2">
           <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
-              <h2 className="text-base font-medium text-neutral-200">
-                {singleState.status === "success"
-                  ? `${singleState.data.symbol} — Price History`
-                  : "Price History"}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  {singleState.status === "success"
+                    ? `${singleState.data.symbol} — Price History`
+                    : "Price History"}
+                </h2>
+                <GlossaryTooltip entryId="price-chart" />
+              </div>
               <p className="mt-1 text-xs text-neutral-500">
                 Markers highlight gap opens and abnormal volume within the selected range.
               </p>
@@ -1150,8 +1436,11 @@ export function StockDashboard(): JSX.Element {
                   ))}
                 </select>
               </div>
-              <div className="hidden text-[11px] text-neutral-500 sm:block">
-                {events.gaps.length} gaps · {events.volumeSpikes.length} volume spikes
+              <div className="hidden items-center gap-2 text-[11px] text-neutral-500 sm:flex">
+                <span>
+                  {events.gaps.length} gaps · {events.volumeSpikes.length} volume spikes
+                </span>
+                <GlossaryTooltip entryId="event-detection" />
               </div>
             </div>
           </div>
@@ -1173,9 +1462,12 @@ export function StockDashboard(): JSX.Element {
 
         {/* Statistics section - takes 1/3 on large screens */}
         <section className="flex flex-col rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-          <h2 className="mb-3 text-base font-medium text-neutral-200">
-            Risk &amp; Return
-          </h2>
+          <div className="mb-3 flex items-center gap-2">
+            <h2 className="text-base font-medium text-neutral-200">
+              Risk &amp; Return
+            </h2>
+            <GlossaryTooltip entryId="risk-cards" />
+          </div>
           {stats ? (
             <StatsCards stats={stats} symbol={symbol} />
           ) : (
@@ -1189,21 +1481,24 @@ export function StockDashboard(): JSX.Element {
       {/* Trend signals section */}
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="mb-4">
-          <h2 className="text-base font-medium text-neutral-200">
-            Trend signals (moving average crossovers)
-          </h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-medium text-neutral-200">
+              Trend signals (Moving Averages)
+            </h2>
+            <GlossaryTooltip entryId="trend-signals" />
+          </div>
           <p className="mt-1 text-xs text-neutral-500">
             Golden cross = short MA crossing above long MA (bullish). Death cross = short MA crossing below long MA (bearish).
           </p>
         </div>
-        <div className="mb-4 flex flex-wrap gap-4">
+        <div className="mb-2 flex flex-wrap gap-4">
           <label className="flex items-center gap-2 text-xs text-neutral-400">
             Short window
             <input
               type="number"
               min={MIN_MA_WINDOW}
-              max={maLongWindow - 1}
-              value={maShortWindow}
+              max={longWindow - 1}
+              value={shortWindow}
               onChange={(event) =>
                 handleShortWindowChange(Number(event.target.value))
               }
@@ -1214,8 +1509,9 @@ export function StockDashboard(): JSX.Element {
             Long window
             <input
               type="number"
-              min={maShortWindow + 1}
-              value={maLongWindow}
+              min={shortWindow + 1}
+              max={MAX_MA_WINDOW}
+              value={longWindow}
               onChange={(event) =>
                 handleLongWindowChange(Number(event.target.value))
               }
@@ -1223,22 +1519,42 @@ export function StockDashboard(): JSX.Element {
             />
           </label>
         </div>
-        {rangeSeries.length === 0 ? (
+        <p className="text-[11px] text-neutral-500">
+          Short MA must be at least 2 days and less than the long MA. Long MA
+          can be up to {MAX_MA_WINDOW} days.
+        </p>
+        {priceSeries.length === 0 ? (
           <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
             Select a date range with data to view moving averages.
           </div>
+        ) : insufficientMaData ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Not enough data for the selected MA windows in this range. Try
+            choosing a shorter window combination or expanding the date range.
+          </div>
         ) : maSeries.length === 0 ? (
           <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
-            Need at least {maLongWindow} days of history to compute the long moving average.
+            Unable to compute moving averages for this configuration. Please adjust the inputs.
           </div>
         ) : (
           <>
             <MaTrendChart
               data={maSeries}
-              shortWindow={maShortWindow}
-              longWindow={maLongWindow}
+              shortWindow={shortWindow}
+              longWindow={longWindow}
               crossovers={maCrossovers}
             />
+            <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-xs text-neutral-300 sm:text-sm">
+              Detected{" "}
+              <span className="font-semibold text-emerald-400">
+                {crossoverCounts.golden}
+              </span>{" "}
+              golden {crossoverCounts.golden === 1 ? "cross" : "crosses"} and{" "}
+              <span className="font-semibold text-red-400">
+                {crossoverCounts.death}
+              </span>{" "}
+              death {crossoverCounts.death === 1 ? "cross" : "crosses"} in the selected range.
+            </div>
             {maCrossovers.length === 0 ? (
               <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
                 No golden or death crosses detected within the selected range.
@@ -1279,10 +1595,10 @@ export function StockDashboard(): JSX.Element {
                           )}
                         </td>
                         <td className="border-b border-neutral-900 px-2 py-2">
-                          {maShortWindow}
+                          {shortWindow}
                         </td>
                         <td className="border-b border-neutral-900 px-2 py-2">
-                          {maLongWindow}
+                          {longWindow}
                         </td>
                       </tr>
                     ))}
@@ -1291,21 +1607,44 @@ export function StockDashboard(): JSX.Element {
               </div>
             )}
             <div className="mt-6 space-y-4">
-              <BacktestSummary
-                result={maBacktest}
-                symbol={symbol}
-                shortWindow={maShortWindow}
-                longWindow={maLongWindow}
-              />
-              <EquityCurveChart result={maBacktest} />
-              <div>
-                <h3 className="mb-2 text-sm font-medium text-neutral-200">
-                  Strategy comparison
-                </h3>
-                <StrategyComparisonTable strategies={strategyComparison} />
-              </div>
+              <h3 className="text-sm font-medium text-neutral-200">
+                MA Crossover Backtest
+              </h3>
+              {maBacktest.trades.length === 0 ? (
+                <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+                  No trades generated by this MA configuration in the selected range.
+                </div>
+              ) : (
+                <>
+                  <BacktestSummary
+                    result={maBacktest}
+                    symbol={symbol}
+                    shortWindow={shortWindow}
+                    longWindow={longWindow}
+                  />
+                  <EquityCurveChart result={maBacktest} />
+                </>
+              )}
             </div>
           </>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4">
+          <h2 className="text-base font-medium text-neutral-200">
+            Strategy comparison (current symbol &amp; range)
+          </h2>
+          <p className="mt-1 text-xs text-neutral-500">
+            Quick view of buy &amp; hold vs. simple signal-based strategies. Statistics are based on the currently selected date range.
+          </p>
+        </div>
+        {strategyComparisonRows.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm text-neutral-400">
+            Not enough data to run the strategy comparison for this selection.
+          </div>
+        ) : (
+          <StrategyComparisonTable rows={strategyComparisonRows} />
         )}
       </section>
 
@@ -1313,9 +1652,12 @@ export function StockDashboard(): JSX.Element {
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
           <div>
-            <h2 className="text-base font-medium text-neutral-200">
-              Regime Classification
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Regime Classification
+              </h2>
+              <GlossaryTooltip entryId="regime-classification" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               Combines moving averages, RSI, and volatility to highlight daily market regimes.
             </p>
@@ -1376,9 +1718,12 @@ export function StockDashboard(): JSX.Element {
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
           <div>
-            <h2 className="text-base font-medium text-neutral-200">
-              Momentum &amp; Oscillators
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Momentum &amp; Oscillators
+              </h2>
+              <GlossaryTooltip entryId="momentum" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               RSI highlights overbought (&gt;70) / oversold (&lt;30). MACD shows momentum shifts (MACD vs signal).
             </p>
@@ -1469,9 +1814,12 @@ export function StockDashboard(): JSX.Element {
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
           <div>
-            <h2 className="text-base font-medium text-neutral-200">
-              Benchmark Analytics
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Benchmark Analytics
+              </h2>
+              <GlossaryTooltip entryId="capm" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               CAPM regression vs {benchmarkDisplayName} ({DEFAULT_BENCHMARK_SYMBOL}).
             </p>
@@ -1508,9 +1856,12 @@ export function StockDashboard(): JSX.Element {
         {/* Histogram - takes 3/5 on large screens */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-3">
           <div className="mb-3">
-            <h2 className="text-base font-medium text-neutral-200">
-              Return Distribution
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Return Distribution
+              </h2>
+              <GlossaryTooltip entryId="return-distribution" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               Histogram of daily log returns over selected range.
             </p>
@@ -1527,9 +1878,12 @@ export function StockDashboard(): JSX.Element {
         {/* Risk Metrics - takes 2/5 on large screens */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-2">
           <div className="mb-3">
-            <h2 className="text-base font-medium text-neutral-200">
-              Risk Profile
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Risk Profile
+              </h2>
+              <GlossaryTooltip entryId="risk-profile" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               Distribution moments and risk-adjusted metrics.
             </p>
@@ -1551,6 +1905,300 @@ export function StockDashboard(): JSX.Element {
         </section>
       </div>
 
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Risk tails (VaR &amp; ES)
+              </h2>
+              <GlossaryTooltip entryId="risk-tail" />
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Value-at-Risk and Expected Shortfall estimates for the selected stock and the equal-weight portfolio.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-400">
+            <label className="flex items-center gap-1">
+              Horizon
+              <select
+                value={tailHorizon}
+                onChange={(event) => setTailHorizon(Number(event.target.value))}
+                className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              >
+                {tailHorizonOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}d
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex items-center gap-1">
+              Confidence
+              <select
+                value={tailConfidence}
+                onChange={(event) => setTailConfidence(Number(event.target.value))}
+                className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              >
+                {tailConfidenceOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {formatPercent(option)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <VarEsPanel label="Selected stock" result={stockVarEs} />
+          <VarEsPanel label="Equal-weight portfolio" result={portfolioVarEs} />
+        </div>
+      </section>
+
+      {/* Serial dependence & volatility clustering */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-medium text-neutral-200">
+              Serial Dependence &amp; Volatility Clustering
+            </h2>
+            <GlossaryTooltip entryId="serial-dependence" />
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            Autocorrelation diagnostics on daily log returns (lags up to 20).
+          </p>
+        </div>
+        {isSingleLoading ? (
+          <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+            Computing autocorrelation…
+          </div>
+        ) : dailyReturnCount < 5 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Not enough data in the selected range to analyse autocorrelation.
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-6 lg:grid-cols-3">
+              <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+                <AcfChart
+                  acf={acfReturns}
+                  title="ACF (returns)"
+                  sampleSize={dailyReturnCount}
+                />
+              </div>
+              <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+                <AcfChart
+                  acf={acfAbsReturns}
+                  title="ACF (|returns|)"
+                  sampleSize={dailyReturnCount}
+                />
+              </div>
+              <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-3">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-neutral-400">
+                  Ljung–Box test
+                </p>
+                <LjungBoxTable results={ljungBoxResults} />
+              </div>
+            </div>
+            <p className="mt-4 text-xs text-neutral-400">
+              {serialDependenceSummary}
+            </p>
+          </>
+        )}
+      </section>
+
+      {/* Seasonality & calendar effects */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-3">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-medium text-neutral-200">
+              Seasonality &amp; Calendar Effects
+            </h2>
+            <GlossaryTooltip entryId="seasonality" />
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            Average daily log returns by day of week and month (selected range).
+          </p>
+        </div>
+        {isSingleLoading ? (
+          <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
+            Analysing seasonality…
+          </div>
+        ) : dayOfWeekSeasonality.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Not enough daily observations to compute seasonality.
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-6 lg:grid-cols-2">
+              <SeasonalityBars
+                title="Day-of-week returns"
+                buckets={dayOfWeekSeasonality}
+              />
+              <SeasonalityBars
+                title="Month-of-year returns"
+                buckets={monthOfYearSeasonality}
+              />
+            </div>
+            <p className="mt-4 text-xs text-neutral-500">
+              Mean daily log returns are plotted in %; standard deviation and observation
+              counts are shown in the tooltip. Patterns may be noisy when sample sizes are small.
+            </p>
+          </>
+        )}
+      </section>
+
+      {/* Screener & Ranking */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Screener &amp; Ranking
+              </h2>
+              <GlossaryTooltip entryId="screener" />
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Rank our NASDAQ universe ({NASDAQ_STOCKS.length} tickers) by momentum, volatility, and Sharpe.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {screenerState.status === "success" && (
+              <label className="flex items-center gap-2 text-xs text-neutral-400">
+                Show top
+                <select
+                  value={screenerTopN}
+                  onChange={(event) => setScreenerTopN(Number(event.target.value))}
+                  className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+                >
+                  {screenerTopNOptions.map((option) => (
+                    <option key={option} value={option}>
+                      {option >= NASDAQ_STOCKS.length ? "All" : option}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button
+              type="button"
+              onClick={handleLoadScreener}
+              disabled={screenerState.status === "loading"}
+              className="rounded-lg border border-neutral-700 bg-neutral-900 px-3 py-1.5 text-xs font-medium text-neutral-100 transition-colors hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {screenerState.status === "loading" ? "Loading…" : "Load Screener"}
+            </button>
+          </div>
+        </div>
+        {screenerState.status === "idle" && (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Load the screener to pull the latest metrics for every symbol in the watchlist.
+          </div>
+        )}
+        {screenerState.status === "loading" && (
+          <div className="flex h-32 items-center justify-center text-sm text-neutral-500">
+            Fetching data for {NASDAQ_STOCKS.length} tickers…
+          </div>
+        )}
+        {screenerState.status === "error" && (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/40 p-4 text-sm text-red-200">
+            {screenerState.error}
+          </div>
+        )}
+        {screenerState.status === "success" && (
+          <>
+            <CrossSectionTable
+              rows={screenerRows}
+              sortBy={screenerSort.key}
+              sortDir={screenerSort.dir}
+              onSortChange={handleScreenerSortChange}
+            />
+            <p className="mt-3 text-xs text-neutral-500">
+              Returns are simple daily returns over ~21/63 trading days. Volatility is annualised from daily log returns; Sharpe assumes a 0% risk-free rate.
+            </p>
+          </>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Risk model (PCA)
+              </h2>
+              <GlossaryTooltip entryId="risk-model" />
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Principal-component view of cross-sectional returns for the NASDAQ universe.
+            </p>
+          </div>
+        </div>
+        {screenerState.status !== "success" ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm text-neutral-400">
+            Load the screener to compute the PCA-based risk model.
+          </div>
+        ) : !pcaResult ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm text-neutral-400">
+            Not enough overlapping history to compute PCA on the selected universe.
+          </div>
+        ) : (
+          <div className="grid gap-6 lg:grid-cols-2">
+            <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4">
+              <PcaExplainedVarianceChart result={pcaResult} />
+            </div>
+            <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4">
+              <PcaLoadingsTable result={pcaResult} />
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Forecast section */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Price Forecast (baseline models)
+              </h2>
+              <GlossaryTooltip entryId="forecast" />
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Simple projections based on naive, rolling mean, or EWMA assumptions. Not investment advice.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-400">
+            <label className="flex items-center gap-1">
+              Model
+              <select
+                value={forecastModel}
+                onChange={(event) => setForecastModel(event.target.value as ForecastModelType)}
+                className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              >
+                <option value="naive">Naive</option>
+                <option value="rolling_mean">Rolling mean</option>
+                <option value="ewma">EWMA</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1">
+              Horizon
+              <select
+                value={forecastHorizon}
+                onChange={(event) => setForecastHorizon(Number(event.target.value))}
+                className="rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 outline-none focus:border-neutral-500"
+              >
+                {forecastHorizonOptions.map((option) => (
+                  <option key={option} value={option}>
+                    {option}d
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+        <ForecastChart history={priceSeries} forecast={forecastPoints} />
+      </section>
+
       {/* Advanced Time-Series Analytics - Collapsible Section */}
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50">
         <button
@@ -1559,9 +2207,12 @@ export function StockDashboard(): JSX.Element {
           className="flex w-full items-center justify-between p-5 text-left transition-colors hover:bg-neutral-800/30"
         >
           <div>
-            <h2 className="text-base font-medium text-neutral-200">
-              Advanced Time-Series Analytics
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Advanced Time-Series Analytics
+              </h2>
+              <GlossaryTooltip entryId="advanced-analytics" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               Rolling volatility, returns, and drawdown analysis.
             </p>
@@ -1674,9 +2325,12 @@ export function StockDashboard(): JSX.Element {
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 xl:col-span-3">
           <div className="mb-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
-              <h2 className="text-base font-medium text-neutral-200">
-                Multi-Stock Comparison
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  Multi-Stock Comparison
+                </h2>
+                <GlossaryTooltip entryId="multi-comparison" />
+              </div>
               <p className="mt-1 text-xs text-neutral-500">
                 Normalized to 1 at range start for relative performance.
               </p>
@@ -1710,9 +2364,12 @@ export function StockDashboard(): JSX.Element {
         {/* Correlation Matrix section */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 xl:col-span-2">
           <div className="mb-4">
-            <h2 className="text-base font-medium text-neutral-200">
-              Correlation Matrix
-            </h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Correlation Matrix
+              </h2>
+              <GlossaryTooltip entryId="correlation-matrix" />
+            </div>
             <p className="mt-1 text-xs text-neutral-500">
               Daily log-return correlations between selected symbols.
             </p>
@@ -1743,9 +2400,12 @@ export function StockDashboard(): JSX.Element {
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
           <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
             <div>
-              <h2 className="text-base font-medium text-neutral-200">
-                Portfolio (equal-weight)
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  Portfolio (equal-weight)
+                </h2>
+                <GlossaryTooltip entryId="equal-weight-portfolio" />
+              </div>
               <p className="mt-1 text-xs text-neutral-500">
                 Normalized to 1 on the first common date of {multiSymbols.join(", ")}.
               </p>
@@ -1772,9 +2432,12 @@ export function StockDashboard(): JSX.Element {
           <div className="mb-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <h2 className="text-base font-medium text-neutral-200">
-                  Rolling Correlations (vs {multiSymbols[0]})
-                </h2>
+                <div className="flex items-center gap-2">
+                  <h2 className="text-base font-medium text-neutral-200">
+                    Rolling Correlations (vs {multiSymbols[0]})
+                  </h2>
+                  <GlossaryTooltip entryId="rolling-correlations" />
+                </div>
                 <p className="mt-1 text-xs text-neutral-500">
                   {correlationWindow}-day rolling correlation coefficients over time. Reference ticker: {multiSymbols[0]}
                 </p>
@@ -1821,6 +2484,8 @@ export function StockDashboard(): JSX.Element {
           )}
         </section>
       )}
+
+      <GlossaryPanel />
     </div>
   );
 }

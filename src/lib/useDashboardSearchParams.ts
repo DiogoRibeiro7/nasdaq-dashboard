@@ -23,7 +23,7 @@ const DEFAULT_SYMBOL = "AAPL";
 const DEFAULT_RANGE: TimeRange = "3M";
 
 /** Valid time range values for validation */
-const VALID_RANGES = new Set<string>(["1M", "3M", "6M", "1Y", "MAX"]);
+const VALID_RANGES = new Set<string>(["5D", "10D", "1M", "3M", "6M", "1Y", "MAX"]);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types

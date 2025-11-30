@@ -1,3 +1,5 @@
+"use client";
+
 import type { JSX } from "react";
 import {
   CartesianGrid,
@@ -8,55 +10,21 @@ import {
   XAxis,
   YAxis,
   Scatter,
+  Legend,
   type TooltipProps,
 } from "recharts";
 import { formatCurrency, formatNumber, formatAxisNumber } from "@/lib/format";
-
-export type MaTrendPoint = {
-  date: string;
-  close: number;
-  maShort: number | null;
-  maLong: number | null;
-};
+import type { MaTrendPoint, MaCrossover } from "@/lib/stats";
 
 export type MaTrendChartProps = {
   data: MaTrendPoint[];
   shortWindow: number;
   longWindow: number;
-  crossovers: { date: string; type: "golden" | "death" }[];
+  crossovers: MaCrossover[];
 };
 
 type MaTrendCrossoverPoint = MaTrendPoint & {
-  crossoverType: "golden" | "death";
-};
-
-type CrossoverMarkerProps = {
-  cx?: number;
-  cy?: number;
-  payload?: MaTrendCrossoverPoint;
-};
-
-const renderCrossoverMarker = ({
-  payload,
-  cx,
-  cy,
-}: CrossoverMarkerProps): JSX.Element => {
-  if (!payload) {
-    return <></>;
-  }
-  const isGolden = payload.crossoverType === "golden";
-  const markerX = (cx ?? 0) - 5;
-  const markerY = (cy ?? 0) - 5;
-
-  return (
-    <svg x={markerX} y={markerY} width={10} height={10}>
-      {isGolden ? (
-        <circle cx={5} cy={5} r={4} fill="#22c55e" />
-      ) : (
-        <rect width={10} height={10} fill="#ef4444" />
-      )}
-    </svg>
-  );
+  crossoverType: MaCrossover["type"];
 };
 
 export function MaTrendChart({
@@ -65,13 +33,19 @@ export function MaTrendChart({
   longWindow,
   crossovers,
 }: MaTrendChartProps): JSX.Element {
-  const markers = crossovers
+  const markers: MaTrendCrossoverPoint[] = crossovers
     .map<MaTrendCrossoverPoint | null>((event) => {
       const point = data.find((item) => item.date === event.date);
       if (!point) return null;
       return { ...point, crossoverType: event.type };
     })
     .filter((value): value is MaTrendCrossoverPoint => value !== null);
+  const goldenMarkers = markers.filter(
+    (marker) => marker.crossoverType === "golden",
+  );
+  const deathMarkers = markers.filter(
+    (marker) => marker.crossoverType === "death",
+  );
 
   const formatValue = (
     value: number | null | undefined,
@@ -117,6 +91,12 @@ export function MaTrendChart({
       <ResponsiveContainer width="100%" height="100%">
         <LineChart data={data}>
           <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
+          <Legend
+            verticalAlign="top"
+            height={32}
+            wrapperStyle={{ fontSize: 11 }}
+            iconSize={10}
+          />
           <XAxis
             dataKey="date"
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
@@ -156,11 +136,24 @@ export function MaTrendChart({
             dot={false}
             connectNulls
           />
-          {markers.length > 0 && (
+          {goldenMarkers.length > 0 && (
             <Scatter
-              data={markers}
+              name="Golden cross"
+              data={goldenMarkers}
               dataKey="close"
-              shape={renderCrossoverMarker}
+              fill="#22c55e"
+              shape="circle"
+              legendType="circle"
+            />
+          )}
+          {deathMarkers.length > 0 && (
+            <Scatter
+              name="Death cross"
+              data={deathMarkers}
+              dataKey="close"
+              fill="#ef4444"
+              shape="diamond"
+              legendType="diamond"
             />
           )}
         </LineChart>

@@ -71,13 +71,15 @@ export type FetchState<T> =
 /**
  * Available time range options for filtering stock data.
  */
-export type TimeRange = "1M" | "3M" | "6M" | "1Y" | "MAX";
+export type TimeRange = "5D" | "10D" | "1M" | "3M" | "6M" | "1Y" | "MAX";
 
 /**
  * Mapping of time ranges to approximate trading days.
  * Based on ~252 trading days per year.
  */
 export const TIME_RANGE_DAYS: Record<Exclude<TimeRange, "MAX">, number> = {
+  "5D": 5,
+  "10D": 10,
   "1M": 21,
   "3M": 63,
   "6M": 126,

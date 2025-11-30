@@ -70,12 +70,17 @@ export type DrawdownPoint = {
 /**
  * A single daily log return data point.
  */
-export type DailyLogReturn = {
+export type DatedReturn = {
   /** Date of the return */
   date: string;
   /** Log return for the day: ln(P_t / P_{t-1}) */
   r: number;
 };
+
+/**
+ * Legacy alias for daily log returns.
+ */
+export type DailyLogReturn = DatedReturn;
 
 /**
  * A single bin in a return distribution histogram.
@@ -85,6 +90,54 @@ export type ReturnDistributionBin = {
   binCenter: number;
   /** Number of observations in this bin */
   count: number;
+};
+
+/**
+ * Sample autocorrelation function (ACF) point.
+ */
+export type AcfPoint = {
+  /** Lag value, starting at 0 */
+  lag: number;
+  /** Autocorrelation at the given lag */
+  value: number;
+};
+
+/**
+ * Result of the Ljung–Box test up to a specific lag.
+ */
+export type LjungBoxResult = {
+  /** Lag where the statistic was evaluated */
+  lag: number;
+  /** Ljung–Box Q statistic */
+  statistic: number;
+  /** P-value under χ² distribution with `lag` degrees of freedom */
+  pValue: number | null;
+};
+
+/**
+ * Aggregated seasonality statistics bucketed by calendar period.
+ */
+export type CalendarBucketStats = {
+  /** Bucket label (e.g., Mon, Tue, Jan, Feb) */
+  bucket: string;
+  /** Number of observations in the bucket */
+  count: number;
+  /** Mean daily return */
+  mean: number;
+  /** Standard deviation of daily returns */
+  std: number;
+};
+
+/**
+ * Cross-sectional metrics for screener / ranking views.
+ */
+export type CrossSectionMetrics = {
+  symbol: string;
+  lastClose: number | null;
+  return1M: number | null;
+  return3M: number | null;
+  volAnnual: number | null;
+  sharpe: number | null;
 };
 
 /**
@@ -102,11 +155,55 @@ export type HigherMoments = {
 };
 
 /**
+ * Price-only input required by several indicators.
+ *
+ * @remarks
+ * Series passed to moving-average helpers must be sorted ascending by date.
+ */
+export type PricePoint = {
+  /** ISO date string (YYYY-MM-DD) */
+  date: string;
+  /** Closing price for the session */
+  close: number;
+};
+
+/**
  * Input format for correlation matrix calculation.
  */
-export type CorrelationInput = {
+export type CorrelationInput = PricePoint;
+
+/**
+ * Single moving-average value aligned to a date.
+ */
+export type MaPoint = {
+  /** ISO date string (YYYY-MM-DD) */
   date: string;
+  /** Moving-average value or null if insufficient history */
+  ma: number | null;
+};
+
+/**
+ * Combined price and MA data for presenting trend signals.
+ */
+export type MaTrendPoint = {
+  /** ISO date string (YYYY-MM-DD) */
+  date: string;
+  /** Original closing price */
   close: number;
+  /** Short-window moving average (null until enough data accumulates) */
+  maShort: number | null;
+  /** Long-window moving average (null until enough data accumulates) */
+  maLong: number | null;
+};
+
+/**
+ * Moving-average crossover classification.
+ */
+export type MaCrossover = {
+  /** Date where the crossover occurred */
+  date: string;
+  /** Crossover type (golden = bullish, death = bearish) */
+  type: "golden" | "death";
 };
 
 /**
@@ -386,140 +483,124 @@ export function detectVolumeSpikes(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Computes a simple moving average (SMA) over a price series.
+ * Computes a trailing simple moving average (SMA) over a price series.
  *
- * The returned array is aligned with the input series but omits the first
- * `window - 1` entries because there is insufficient history to compute
- * a complete average.
+ * @remarks
+ * The input series must be sorted ascending by date. Dates that do not have
+ * sufficient history (fewer than `window` closes) receive `ma = null`.
  *
- * @param series - Array of date/close pairs sorted ascending by date
- * @param window - Number of observations in the averaging window
- * @returns Array of SMA points starting from the first complete window
+ * @param series - Price series sorted ascending by date
+ * @param window - Lookback window length (must be > 0)
+ * @returns Array aligned to the input series with two-decimal SMA values
  */
 export function computeMovingAverage(
-  series: CorrelationInput[],
+  series: PricePoint[],
   window: number,
-): { date: string; ma: number }[] {
-  if (window <= 0 || series.length === 0 || series.length < window) {
+): MaPoint[] {
+  if (series.length === 0 || window <= 0) {
     return [];
   }
 
-  const result: { date: string; ma: number }[] = [];
-  let sum = 0;
+  const result: MaPoint[] = [];
+  const buffer = new Array<number>(window);
+  let bufferCount = 0;
+  let rollingSum = 0;
 
-  for (let i = 0; i < series.length; i++) {
-    const price = series[i].close;
-    if (!isValidPrice(price)) {
+  for (const point of series) {
+    if (!isValidPrice(point.close)) {
       return [];
     }
 
-    sum += price;
-
-    if (i >= window) {
-      sum -= series[i - window].close;
+    const slot = bufferCount % window;
+    if (bufferCount >= window) {
+      rollingSum -= buffer[slot];
     }
 
-    if (i >= window - 1) {
-      result.push({
-        date: series[i].date,
-        ma: sum / window,
-      });
-    }
+    buffer[slot] = point.close;
+    rollingSum += point.close;
+    bufferCount += 1;
+
+    const hasFullWindow = bufferCount >= window;
+    result.push({
+      date: point.date,
+      ma: hasFullWindow ? rollingSum / window : null,
+    });
   }
 
   return result;
 }
 
 /**
- * Computes short- and long-window moving averages aligned with the original series.
+ * Computes short- and long-window moving averages aligned to the source prices.
  *
- * Entries without sufficient history receive `null` for the corresponding MA.
- *
- * @param series - Array of date/close pairs sorted ascending by date
- * @param shortWindow - Window length for the fast average
- * @param longWindow - Window length for the slow average
- * @returns Array combining original closes with both moving averages
+ * @param series - Price series sorted ascending by date
+ * @param shortWindow - Faster moving-average window (must be > 0)
+ * @param longWindow - Slower moving-average window (must be > 0)
+ * @returns Combined price/MA data for the given windows
  */
 export function computeDualMovingAverages(
-  series: CorrelationInput[],
+  series: PricePoint[],
   shortWindow: number,
   longWindow: number,
-): Array<{
-  date: string;
-  close: number;
-  maShort: number | null;
-  maLong: number | null;
-}> {
-  if (series.length === 0) {
+): MaTrendPoint[] {
+  if (series.length === 0 || shortWindow <= 0 || longWindow <= 0) {
     return [];
   }
 
-  const shortMap =
-    shortWindow > 0
-      ? new Map(
-          computeMovingAverage(series, shortWindow).map((point) => [
-            point.date,
-            point.ma,
-          ]),
-        )
-      : new Map<string, number>();
+  const shortMa = computeMovingAverage(series, shortWindow);
+  const longMa = computeMovingAverage(series, longWindow);
 
-  const longMap =
-    longWindow > 0
-      ? new Map(
-          computeMovingAverage(series, longWindow).map((point) => [
-            point.date,
-            point.ma,
-          ]),
-        )
-      : new Map<string, number>();
+  if (
+    shortMa.length !== series.length ||
+    longMa.length !== series.length ||
+    shortMa.length === 0 ||
+    longMa.length === 0
+  ) {
+    return [];
+  }
 
-  return series.map((point) => ({
+  return series.map((point, index) => ({
     date: point.date,
     close: point.close,
-    maShort: shortMap.get(point.date) ?? null,
-    maLong: longMap.get(point.date) ?? null,
+    maShort: shortMa[index]?.ma ?? null,
+    maLong: longMa[index]?.ma ?? null,
   }));
 }
 
 /**
- * Detects moving-average crossover signals (golden/death crosses).
+ * Detects golden/death cross events from dual moving-average data.
  *
- * Golden cross: short MA crosses above long MA (trend turning bullish).
- * Death cross: short MA crosses below long MA (trend turning bearish).
- *
- * @param data - Array with short/long moving averages per date (sorted ascending)
- * @returns Array of crossover events with their date and type
+ * @param data - Combined price/MA series sorted ascending by date
+ * @returns Array of crossover events ordered by date
  */
 export function detectMovingAverageCrossovers(
-  data: { date: string; maShort: number | null; maLong: number | null }[],
-): { date: string; type: "golden" | "death" }[] {
-  const events: { date: string; type: "golden" | "death" }[] = [];
-  let prevSign: -1 | 1 | null = null;
+  data: MaTrendPoint[],
+): MaCrossover[] {
+  if (data.length === 0) {
+    return [];
+  }
+
+  const events: MaCrossover[] = [];
+  let previousDiff: number | null = null;
 
   for (const point of data) {
-    if (point.maShort === null || point.maLong === null) {
+    const { maShort, maLong } = point;
+    if (maShort === null || maLong === null) {
+      previousDiff = null;
       continue;
     }
 
-    const diff = point.maShort - point.maLong;
-    if (diff === 0) {
-      continue;
+    const diff = maShort - maLong;
+
+    if (previousDiff !== null) {
+      if (previousDiff <= 0 && diff > 0) {
+        events.push({ date: point.date, type: "golden" });
+      } else if (previousDiff >= 0 && diff < 0) {
+        events.push({ date: point.date, type: "death" });
+      }
     }
 
-    const currentSign: -1 | 1 = diff > 0 ? 1 : -1;
-    if (prevSign === null) {
-      prevSign = currentSign;
-      continue;
-    }
-
-    if (currentSign !== prevSign) {
-      events.push({
-        date: point.date,
-        type: currentSign > 0 ? "golden" : "death",
-      });
-      prevSign = currentSign;
-    }
+    previousDiff = diff;
   }
 
   return events;
@@ -577,8 +658,8 @@ function computeCagr(
  * - Equity remains constant while flat, grows with price when long
  */
 export function backtestMaCrossoverStrategy(
-  series: { date: string; close: number }[],
-  crossovers: { date: string; type: "golden" | "death" }[],
+  series: PricePoint[],
+  crossovers: MaCrossover[],
 ): BacktestResult {
   if (series.length === 0) {
     return {
@@ -1872,6 +1953,321 @@ export function computeSharpeRatio(
   const sharpe = (meanAnnual - riskFreeRateAnnual) / stdAnnual;
 
   return Number.isFinite(sharpe) ? sharpe : null;
+}
+
+/**
+ * Computes the sample autocorrelation function (ACF) up to a specified lag.
+ *
+ * Uses the unbiased estimator by dividing by the sum of squared deviations
+ * (lag 0 variance) and adjusting for the number of overlapping observations.
+ *
+ * @param returns - Array of dated returns sorted ascending by date
+ * @param maxLag - Maximum lag (inclusive) to compute
+ * @returns Array of ACF values starting at lag 0
+ */
+export function computeAcf(
+  returns: DatedReturn[],
+  maxLag: number,
+): AcfPoint[] {
+  const n = returns.length;
+  if (n === 0 || maxLag < 0) {
+    return [];
+  }
+
+  const values = returns.map((point) => point.r);
+  const mean =
+    values.reduce((sum, value) => sum + value, 0) / (values.length || 1);
+  const centered = values.map((value) => value - mean);
+
+  const variance = centered.reduce((sum, value) => sum + value * value, 0);
+  if (variance === 0) {
+    return [{ lag: 0, value: 1 }];
+  }
+
+  const clampedLag = Math.min(maxLag, n - 1);
+  const acf: AcfPoint[] = [];
+
+  for (let lag = 0; lag <= clampedLag; lag++) {
+    let numerator = 0;
+    for (let t = lag; t < n; t++) {
+      numerator += centered[t] * centered[t - lag];
+    }
+    const value =
+      lag === 0 ? 1 : (numerator / variance) * (n / (n - lag));
+    acf.push({
+      lag,
+      value: Number.isFinite(value) ? value : NaN,
+    });
+  }
+
+  return acf;
+}
+
+/**
+ * Computes Ljung–Box Q statistics up to a specified lag along with approximate p-values.
+ *
+ * @param returns - Array of dated returns sorted ascending by date
+ * @param maxLag - Maximum lag (inclusive)
+ * @returns Array of Ljung–Box statistics for each lag
+ */
+export function computeLjungBox(
+  returns: DatedReturn[],
+  maxLag: number,
+): LjungBoxResult[] {
+  const n = returns.length;
+  if (n < 2 || maxLag < 1) {
+    return [];
+  }
+
+  const effectiveMaxLag = Math.min(maxLag, n - 1);
+  if (effectiveMaxLag < 1) {
+    return [];
+  }
+
+  const acf = computeAcf(returns, effectiveMaxLag);
+  const acfMap = new Map(acf.map((point) => [point.lag, point.value]));
+
+  const results: LjungBoxResult[] = [];
+
+  for (let h = 1; h <= effectiveMaxLag; h++) {
+    if (n - h <= 0) {
+      break;
+    }
+
+    let sum = 0;
+    for (let k = 1; k <= h; k++) {
+      const rho = acfMap.get(k) ?? 0;
+      if (!Number.isFinite(rho)) {
+        continue;
+      }
+      sum += (rho * rho) / (n - k);
+    }
+
+    const statistic = n * (n + 2) * sum;
+    const pValue =
+      statistic > 0 ? chiSquareUpperTail(statistic, h) : 1;
+
+    results.push({
+      lag: h,
+      statistic,
+      pValue,
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Computes return statistics aggregated by day of week (Monday–Sunday).
+ *
+ * @param returns - Daily log returns sorted ascending by date
+ * @returns Calendar bucket stats ordered Monday→Sunday
+ */
+export function computeDayOfWeekSeasonality(
+  returns: DatedReturn[],
+): CalendarBucketStats[] {
+  if (returns.length === 0) {
+    return [];
+  }
+
+  const dayBuckets: Record<
+    number,
+    { sum: number; sumSq: number; count: number }
+  > = {};
+
+  for (const point of returns) {
+    const day = new Date(point.date).getUTCDay(); // 0=Sun ... 6=Sat
+    if (!dayBuckets[day]) {
+      dayBuckets[day] = { sum: 0, sumSq: 0, count: 0 };
+    }
+    dayBuckets[day].sum += point.r;
+    dayBuckets[day].sumSq += point.r * point.r;
+    dayBuckets[day].count += 1;
+  }
+
+  const labels = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const orderedDays = [1, 2, 3, 4, 5, 6, 0]; // Monday-first
+
+  return orderedDays
+    .map((day) => {
+      const bucket = dayBuckets[day];
+      if (!bucket || bucket.count === 0) {
+        return null;
+      }
+      const mean = bucket.sum / bucket.count;
+      const variance =
+        bucket.count > 1
+          ? (bucket.sumSq - bucket.count * mean * mean) / (bucket.count - 1)
+          : 0;
+      return {
+        bucket: labels[day],
+        count: bucket.count,
+        mean,
+        std: Math.sqrt(Math.max(variance, 0)),
+      };
+    })
+    .filter((bucket): bucket is CalendarBucketStats => bucket !== null);
+}
+
+/**
+ * Computes return statistics aggregated by month of year (Jan–Dec).
+ *
+ * @param returns - Daily log returns sorted ascending by date
+ * @returns Calendar bucket stats ordered Jan→Dec
+ */
+export function computeMonthOfYearSeasonality(
+  returns: DatedReturn[],
+): CalendarBucketStats[] {
+  if (returns.length === 0) {
+    return [];
+  }
+
+  const buckets: Record<
+    number,
+    { sum: number; sumSq: number; count: number }
+  > = {};
+
+  for (const point of returns) {
+    const month = new Date(point.date).getUTCMonth(); // 0=Jan ... 11=Dec
+    if (!buckets[month]) {
+      buckets[month] = { sum: 0, sumSq: 0, count: 0 };
+    }
+    buckets[month].sum += point.r;
+    buckets[month].sumSq += point.r * point.r;
+    buckets[month].count += 1;
+  }
+
+  const labels = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+
+  return labels
+    .map((label, index) => {
+      const bucket = buckets[index];
+      if (!bucket || bucket.count === 0) {
+        return null;
+      }
+      const mean = bucket.sum / bucket.count;
+      const variance =
+        bucket.count > 1
+          ? (bucket.sumSq - bucket.count * mean * mean) / (bucket.count - 1)
+          : 0;
+      return {
+        bucket: label,
+        count: bucket.count,
+        mean,
+        std: Math.sqrt(Math.max(variance, 0)),
+      };
+    })
+    .filter((bucket): bucket is CalendarBucketStats => bucket !== null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gamma / Chi-Square Helpers (for Ljung–Box p-values)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LANCZOS_COEFFS = [
+  0.99999999999980993,
+  676.5203681218851,
+  -1259.1392167224028,
+  771.32342877765313,
+  -176.61502916214059,
+  12.507343278686905,
+  -0.13857109526572012,
+  9.9843695780195716e-6,
+  1.5056327351493116e-7,
+];
+
+function logGamma(z: number): number {
+  if (z < 0.5) {
+    return Math.log(Math.PI) - Math.log(Math.sin(Math.PI * z)) - logGamma(1 - z);
+  }
+
+  z -= 1;
+  let x = LANCZOS_COEFFS[0];
+  for (let i = 1; i < LANCZOS_COEFFS.length; i++) {
+    x += LANCZOS_COEFFS[i] / (z + i);
+  }
+  const t = z + LANCZOS_COEFFS.length - 0.5;
+
+  return (
+    0.5 * Math.log(2 * Math.PI) +
+    (z + 0.5) * Math.log(t) -
+    t +
+    Math.log(x)
+  );
+}
+
+function regularizedGammaLower(s: number, x: number): number {
+  if (x <= 0) {
+    return 0;
+  }
+  if (s <= 0) {
+    return NaN;
+  }
+  if (x < s + 1) {
+    // Series expansion
+    let sum = 1 / s;
+    let term = sum;
+    for (let n = 1; n < 200; n++) {
+      term *= x / (s + n);
+      sum += term;
+      if (Math.abs(term) < Math.abs(sum) * 1e-12) {
+        break;
+      }
+    }
+    return (
+      sum *
+      Math.exp(-x + s * Math.log(x) - logGamma(s))
+    );
+  }
+
+  // Continued fraction for upper gamma, then subtract from 1
+  let a = 1 - s;
+  let b = x + 1 - s;
+  let fp = 1;
+  let c = 1 / 1e-30;
+  let d = 1 / b;
+  let h = d;
+  for (let n = 1; n < 200; n++) {
+    const an = n * (s - n);
+    a += 2;
+    b += 2;
+    d = 1 / (a * d + b);
+    c = b + a / c;
+    const delta = c * d;
+    h *= delta;
+    if (Math.abs(delta - 1) < 1e-12) {
+      break;
+    }
+  }
+  const upper =
+    Math.exp(-x + s * Math.log(x) - logGamma(s)) * h;
+  return 1 - upper;
+}
+
+function chiSquareUpperTail(statistic: number, dof: number): number | null {
+  if (statistic < 0 || dof <= 0) {
+    return null;
+  }
+  const s = dof / 2;
+  const x = statistic / 2;
+  const cdf = regularizedGammaLower(s, x);
+  if (!Number.isFinite(cdf)) {
+    return null;
+  }
+  return Math.max(0, Math.min(1, 1 - cdf));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
