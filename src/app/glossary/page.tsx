@@ -84,6 +84,7 @@ export default function GlossaryPage(): JSX.Element {
         {filtered.map((entry) => (
           <article
             key={entry.id}
+            id={entry.id}
             className="rounded-2xl border border-neutral-800 bg-neutral-900/60 p-5"
           >
             <div className="text-[11px] uppercase tracking-wide text-neutral-500">

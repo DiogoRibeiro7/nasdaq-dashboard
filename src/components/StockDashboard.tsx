@@ -33,6 +33,7 @@ import {
   computeLjungBox,
   computeDayOfWeekSeasonality,
   computeMonthOfYearSeasonality,
+  computeMovingAverage,
 } from "@/lib/stats";
 import { forecastPrices, type ForecastModelType } from "@/lib/analytics/forecast";
 import type {
@@ -51,6 +52,12 @@ import type {
   CalendarBucketStats,
   CrossSectionMetrics,
   DatedReturn,
+  RsiPoint,
+  MacdPoint,
+  MaTrendPoint,
+  RegimePoint,
+  GapEvent,
+  VolumeSpikeEvent,
 } from "@/lib/stats";
 import { MultiStockSelector } from "@/components/MultiStockSelector";
 import { MultiStockChart } from "@/components/MultiStockChart";
@@ -72,6 +79,8 @@ import { PortfolioChart } from "@/components/PortfolioChart";
 import { PortfolioStatsPanel } from "@/components/PortfolioStatsPanel";
 import { EfficientFrontierChart } from "@/components/EfficientFrontierChart";
 import { PortfolioWeightsTable } from "@/components/PortfolioWeightsTable";
+import { PortfolioDesigner } from "@/components/PortfolioDesigner";
+import { PortfolioBacktestPanel } from "@/components/PortfolioBacktestPanel";
 import { StrategyComparisonTable } from "@/components/StrategyComparisonTable";
 import { AcfChart } from "@/components/AcfChart";
 import { LjungBoxTable } from "@/components/LjungBoxTable";
@@ -85,6 +94,10 @@ import { PcaExplainedVarianceChart } from "@/components/PcaExplainedVarianceChar
 import { PcaLoadingsTable } from "@/components/PcaLoadingsTable";
 import { ScenarioPanel } from "@/components/ScenarioPanel";
 import { MonteCarloChart } from "@/components/MonteCarloChart";
+import { StrategyLab } from "@/components/StrategyLab";
+import { RobustnessControls } from "@/components/RobustnessControls";
+import { RobustnessHeatmap } from "@/components/RobustnessHeatmap";
+import { ExplainPanelButton } from "@/components/ExplainPanelButton";
 import { FactorLoadingsPanel } from "@/components/FactorLoadingsPanel";
 import type {
   ChartPoint,
@@ -126,6 +139,20 @@ import {
   simulateMonteCarloPaths,
   type ShockScenario,
 } from "@/lib/analytics/scenario";
+import {
+  serializeIndicatorKey,
+} from "@/lib/analytics/strategy_config";
+import type { IndicatorSeriesMap } from "@/lib/analytics/strategy_engine";
+import {
+  computeMaRobustnessSurface,
+  type ParamGrid2D,
+  type RobustnessMetric,
+} from "@/lib/analytics/robustness";
+import {
+  backtestPortfolio,
+  type RebalanceFrequency,
+  type TargetWeights,
+} from "@/lib/analytics/portfolio_backtest";
 import {
   computeEfficientFrontier,
   findMaxSharpePortfolio,
@@ -184,6 +211,27 @@ function computePointSharpe(
     return null;
   }
   return (point.expectedReturn - riskFreeRate) / point.volatility;
+}
+
+function normalizeTargetWeights(
+  weights: TargetWeights,
+  symbols: string[],
+): TargetWeights | null {
+  const filtered: TargetWeights = {};
+  let sum = 0;
+  for (const symbol of symbols) {
+    const value = Math.max(weights[symbol] ?? 0, 0);
+    filtered[symbol] = value;
+    sum += value;
+  }
+  if (sum <= 0) {
+    return null;
+  }
+  const normalized: TargetWeights = {};
+  for (const symbol of symbols) {
+    normalized[symbol] = filtered[symbol] / sum;
+  }
+  return normalized;
 }
 
 function computeDailyStats(
@@ -337,6 +385,20 @@ type CsvBuildContext = {
   rollingVol63: RollingVolatilityPoint[];
   rollingRet21: RollingReturnPoint[];
   drawdown: DrawdownPoint[];
+  rsiSeries: RsiPoint[];
+  macdSeries: MacdPoint[];
+  maSeries: MaTrendPoint[];
+  regimes: RegimePoint[];
+  gapEvents: GapEvent[];
+  volumeSpikes: VolumeSpikeEvent[];
+  riskMetrics: {
+    mean: number;
+    std: number;
+    skewness: number;
+    kurtosis: number;
+    sharpe: number | null;
+  };
+  capmStats: CapmStats;
 };
 
 function buildCsvContent({
@@ -346,6 +408,14 @@ function buildCsvContent({
   rollingVol63,
   rollingRet21,
   drawdown,
+  rsiSeries,
+  macdSeries,
+  maSeries,
+  regimes,
+  gapEvents,
+  volumeSpikes,
+  riskMetrics,
+  capmStats,
 }: CsvBuildContext): string {
   const logReturnMap = new Map(dailyReturns.map((item) => [item.date, item.r]));
   const rollingVol21Map = new Map(
@@ -358,6 +428,24 @@ function buildCsvContent({
     rollingRet21.map((item) => [item.date, item.ret]),
   );
   const drawdownMap = new Map(drawdown.map((item) => [item.date, item]));
+  const rsiMap = new Map(rsiSeries.map((item) => [item.date, item.rsi]));
+  const macdMap = new Map(
+    macdSeries.map((item) => [
+      item.date,
+      { macd: item.macd, signal: item.signal },
+    ]),
+  );
+  const maMap = new Map(
+    maSeries.map((item) => [
+      item.date,
+      { short: item.maShort, long: item.maLong },
+    ]),
+  );
+  const regimeMap = new Map(regimes.map((item) => [item.date, item.regime]));
+  const gapMap = new Map(gapEvents.map((event) => [event.date, event.gapPct]));
+  const volumeSpikeMap = new Map(
+    volumeSpikes.map((event) => [event.date, event.zScore]),
+  );
 
   const header = [
     "date",
@@ -371,11 +459,28 @@ function buildCsvContent({
     "rolling_vol_63",
     "rolling_return_21",
     "drawdown",
-    "peak_to_trough",
+    "rsi_14",
+    "macd",
+    "macd_signal",
+    "ma_short",
+    "ma_long",
+    "regime",
+    "gap_event",
+    "volume_spike",
+    "sharpe_ratio",
+    "mean_daily_return",
+    "std_daily_return",
+    "skewness",
+    "kurtosis",
+    "beta",
+    "alpha_daily",
+    "alpha_annual",
   ];
 
   const rows = rangeSeries.map((point) => {
     const drawdownPoint = drawdownMap.get(point.date);
+    const macdPoint = macdMap.get(point.date);
+    const maPoint = maMap.get(point.date);
     return [
       point.date,
       point.open,
@@ -388,7 +493,22 @@ function buildCsvContent({
       rollingVol63Map.get(point.date) ?? "",
       rollingRet21Map.get(point.date) ?? "",
       drawdownPoint?.drawdown ?? "",
-      drawdownPoint?.peakToTrough ?? "",
+      rsiMap.get(point.date) ?? "",
+      macdPoint?.macd ?? "",
+      macdPoint?.signal ?? "",
+      maPoint?.short ?? "",
+      maPoint?.long ?? "",
+      regimeMap.get(point.date) ?? "",
+      gapMap.get(point.date) ?? "",
+      volumeSpikeMap.get(point.date) ?? "",
+      riskMetrics.sharpe ?? "",
+      riskMetrics.mean ?? "",
+      riskMetrics.std ?? "",
+      riskMetrics.skewness ?? "",
+      riskMetrics.kurtosis ?? "",
+      capmStats.beta ?? "",
+      capmStats.alphaDaily ?? "",
+      capmStats.alphaAnnual ?? "",
     ];
   });
 
@@ -520,6 +640,14 @@ export function StockDashboard(): JSX.Element {
   );
   const [portfolioMonteCarloHorizon, setPortfolioMonteCarloHorizon] =
     useState(DEFAULT_MONTE_CARLO_HORIZON);
+  const [customWeights, setCustomWeights] = useState<TargetWeights>({});
+  const [customFrequency, setCustomFrequency] =
+    useState<RebalanceFrequency>("monthly");
+  const [customTransactionCostBps, setCustomTransactionCostBps] = useState(10);
+  const [robustnessMetric, setRobustnessMetric] =
+    useState<RobustnessMetric>("totalReturn");
+  const [robustnessShortStart, setRobustnessShortStart] = useState(10);
+  const [robustnessLongStart, setRobustnessLongStart] = useState(100);
 
   // ───────────────────────────────────────────────────────────────────────────
   // Data Fetching
@@ -957,6 +1085,69 @@ export function StockDashboard(): JSX.Element {
     });
   }, [priceSeries, maSeries, rsiData, advancedAnalytics.rollingVol21, volThresholdHigh]);
 
+  const strategyIndicatorSeries = useMemo<IndicatorSeriesMap | null>(() => {
+    if (priceSeries.length === 0) {
+      return null;
+    }
+
+    const priceEntries = priceSeries.map((point) => ({
+      date: point.date,
+      value: point.close,
+    }));
+
+    const maSeriesMap: IndicatorSeriesMap["ma"] = {};
+    for (const window of STRATEGY_MA_WINDOWS) {
+      const key = serializeIndicatorKey("ma", { window });
+      const maPoints = computeMovingAverage(priceSeries, window);
+      maSeriesMap[key] = maPoints.map((point) => ({
+        date: point.date,
+        value: point.ma,
+      }));
+    }
+
+    const rsiSeriesMap: IndicatorSeriesMap["rsi"] = {};
+    for (const period of STRATEGY_RSI_PERIODS) {
+      const key = serializeIndicatorKey("rsi", { period });
+      const rsiPoints = computeRsi(priceSeries, period);
+      rsiSeriesMap[key] = rsiPoints.map((point) => ({
+        date: point.date,
+        value: point.rsi,
+      }));
+    }
+
+    const regimeSeries =
+      regimeData.length > 0
+        ? regimeData.map((point) => ({
+            date: point.date,
+            value: point.regime,
+          }))
+        : [];
+
+    return {
+      price: priceEntries,
+      ma: maSeriesMap,
+      rsi: rsiSeriesMap,
+      regime: regimeSeries,
+    };
+  }, [priceSeries, regimeData]);
+
+  const robustnessSurface = useMemo(() => {
+    if (priceSeries.length === 0) {
+      return [];
+    }
+    const shortValues = STRATEGY_MA_WINDOWS.filter(
+      (value) => value >= robustnessShortStart && value < robustnessLongStart,
+    );
+    const longValues = STRATEGY_LONG_WINDOWS.filter(
+      (value) => value >= robustnessLongStart,
+    );
+    const grid: ParamGrid2D = {
+      x: { name: "shortWindow", values: shortValues },
+      y: { name: "longWindow", values: longValues },
+    };
+    return computeMaRobustnessSurface(priceSeries, grid);
+  }, [priceSeries, robustnessShortStart, robustnessLongStart]);
+
   const maSignalBacktest = useMemo(() => {
     if (priceSeries.length === 0 || maSeries.length === 0) {
       return null;
@@ -1195,6 +1386,35 @@ export function StockDashboard(): JSX.Element {
     };
   }, [multiState, multiSelectedSymbols, range]);
 
+  useEffect(() => {
+    if (multiSymbols.length === 0) {
+      setCustomWeights({});
+      return;
+    }
+    setCustomWeights((prev) => {
+      const provisional: TargetWeights = {};
+      let sum = 0;
+      for (const symbol of multiSymbols) {
+        const value = prev[symbol] ?? 1 / multiSymbols.length;
+        provisional[symbol] = value;
+        sum += value;
+      }
+      if (sum <= 0) {
+        const equalWeight = 1 / multiSymbols.length;
+        const normalized: TargetWeights = {};
+        for (const symbol of multiSymbols) {
+          normalized[symbol] = equalWeight;
+        }
+        return normalized;
+      }
+      const normalized: TargetWeights = {};
+      for (const symbol of multiSymbols) {
+        normalized[symbol] = provisional[symbol] / sum;
+      }
+      return normalized;
+    });
+  }, [multiSymbols]);
+
   const portfolioData = useMemo(() => {
     if (multiState.status !== "success" || multiSymbols.length < 2) {
       return {
@@ -1228,6 +1448,52 @@ export function StockDashboard(): JSX.Element {
     portfolioData.series.length > 0
       ? portfolioData.series[portfolioData.series.length - 1].close
       : 1;
+
+  const customPortfolioResult = useMemo(() => {
+    if (
+      multiState.status !== "success" ||
+      multiSymbols.length === 0 ||
+      Object.keys(customWeights).length === 0
+    ) {
+      return null;
+    }
+
+    const normalized = normalizeTargetWeights(customWeights, multiSymbols);
+    if (!normalized) {
+      return null;
+    }
+
+    const pricesBySymbol: Record<string, { date: string; close: number }[]> = {};
+    for (const symbol of multiSymbols) {
+      const stock = multiState.data[symbol];
+      if (!stock) {
+        return null;
+      }
+      const filtered = filterByRange(stock.series, range).map((point) => ({
+        date: point.date,
+        close: point.close,
+      }));
+      if (filtered.length === 0) {
+        return null;
+      }
+      pricesBySymbol[symbol] = filtered;
+    }
+
+    return backtestPortfolio({
+      initialEquity: 1,
+      pricesBySymbol,
+      targetWeights: normalized,
+      frequency: customFrequency,
+      transactionCostBps: customTransactionCostBps,
+    });
+  }, [
+    multiState,
+    multiSymbols,
+    range,
+    customWeights,
+    customFrequency,
+    customTransactionCostBps,
+  ]);
 
   const portfolioLogReturns = useMemo(() => {
     if (portfolioData.series.length < 2) {
@@ -1528,6 +1794,20 @@ export function StockDashboard(): JSX.Element {
       rollingVol63: advancedAnalytics.rollingVol63,
       rollingRet21: advancedAnalytics.rollingRet21,
       drawdown: advancedAnalytics.drawdown,
+      rsiSeries: rsiData,
+      macdSeries: macdData,
+      maSeries,
+      regimes: regimeData,
+      gapEvents: events.gaps,
+      volumeSpikes: events.volumeSpikes,
+      riskMetrics: {
+        mean: returnDistribution.moments.mean,
+        std: returnDistribution.moments.std,
+        skewness: returnDistribution.moments.skewness,
+        kurtosis: returnDistribution.moments.kurtosis,
+        sharpe: returnDistribution.sharpeRatio,
+      },
+      capmStats,
     });
 
     const filename = buildFilename("analytics.csv");
@@ -1970,13 +2250,20 @@ export function StockDashboard(): JSX.Element {
       </section>
 
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-        <div className="mb-4">
-          <h2 className="text-base font-medium text-neutral-200">
-            Strategy comparison (current symbol &amp; range)
-          </h2>
-          <p className="mt-1 text-xs text-neutral-500">
-            Quick view of buy &amp; hold vs. simple signal-based strategies. Statistics are based on the currently selected date range.
-          </p>
+        <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h2 className="text-base font-medium text-neutral-200">
+              Strategy comparison (current symbol &amp; range)
+            </h2>
+            <p className="mt-1 text-xs text-neutral-500">
+              Quick view of buy &amp; hold vs. simple signal-based strategies. Statistics are based on the currently selected date range.
+            </p>
+          </div>
+          <ExplainPanelButton
+            title="Strategy comparison"
+            summary="Compare buy & hold with basic signal-driven strategies using consistent stats such as total return, max drawdown, Sharpe, and turnover."
+            termIds={["cagr", "max_drawdown", "sharpe_ratio", "turnover"]}
+          />
         </div>
         {strategyComparisonRows.length === 0 ? (
           <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm text-neutral-400">
@@ -2296,16 +2583,23 @@ export function StockDashboard(): JSX.Element {
       <div className="grid gap-6 lg:grid-cols-5">
         {/* Histogram - takes 3/5 on large screens */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-3">
-          <div className="mb-3">
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-medium text-neutral-200">
-                Return Distribution
-              </h2>
-              <GlossaryTooltip termId="return-distribution" />
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  Return Distribution
+                </h2>
+                <GlossaryTooltip termId="return_distribution" />
+              </div>
+              <p className="mt-1 text-xs text-neutral-500">
+                Histogram of daily log returns over selected range.
+              </p>
             </div>
-            <p className="mt-1 text-xs text-neutral-500">
-              Histogram of daily log returns over selected range.
-            </p>
+            <ExplainPanelButton
+              title="Return distribution"
+              summary="Visualise the shape of daily returns to spot skewness, fat tails, and volatility regimes that influence downstream risk metrics."
+              termIds={["return_distribution", "volatility_annualised", "sharpe_ratio"]}
+            />
           </div>
           {isSingleLoading ? (
             <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
@@ -2318,16 +2612,23 @@ export function StockDashboard(): JSX.Element {
 
         {/* Risk Metrics - takes 2/5 on large screens */}
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5 lg:col-span-2">
-          <div className="mb-3">
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-medium text-neutral-200">
-                Risk Profile
-              </h2>
-              <GlossaryTooltip termId="risk-profile" />
+          <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  Risk Profile
+                </h2>
+                <GlossaryTooltip termId="risk_profile" />
+              </div>
+              <p className="mt-1 text-xs text-neutral-500">
+                Distribution moments and risk-adjusted metrics.
+              </p>
             </div>
-            <p className="mt-1 text-xs text-neutral-500">
-              Distribution moments and risk-adjusted metrics.
-            </p>
+            <ExplainPanelButton
+              title="Risk profile"
+              summary="Summarises mean, volatility, Sharpe, skew, and kurtosis so you can gauge whether returns behave normally or exhibit tail risks."
+              termIds={["risk_profile", "volatility_annualised", "sharpe_ratio", "skewness", "kurtosis"]}
+            />
           </div>
           {isSingleLoading ? (
             <div className="flex h-48 items-center justify-center text-sm text-neutral-500">
@@ -2358,6 +2659,13 @@ export function StockDashboard(): JSX.Element {
             <p className="mt-1 text-xs text-neutral-500">
               Value-at-Risk and Expected Shortfall estimates for the selected stock and the equal-weight portfolio.
             </p>
+            <div className="mt-2">
+              <ExplainPanelButton
+                title="Risk tails"
+                summary="Estimate the downside you might face over the selected horizon by looking at VaR (loss threshold) and Expected Shortfall (average loss beyond that threshold)."
+                termIds={["value_at_risk", "expected_shortfall"]}
+              />
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-400">
             <label className="flex items-center gap-1">
@@ -2929,17 +3237,62 @@ export function StockDashboard(): JSX.Element {
         </section>
       )}
 
+      {multiSymbols.length >= 2 && multiState.status === "success" && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  Custom portfolio backtest
+                </h2>
+                <GlossaryTooltip termId="equal-weight-portfolio" />
+              </div>
+              <p className="mt-1 text-xs text-neutral-500">
+                Allocate target weights, choose a rebalance schedule, and simulate transaction costs on the selected basket.
+              </p>
+            </div>
+            <ExplainPanelButton
+              title="Custom portfolio backtest"
+              summary="Design your own target-weight portfolio, choose how often to rebalance, and account for transaction costs to see realistic equity curves."
+              termIds={["turnover", "transaction_costs"]}
+            />
+          </div>
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,280px),1fr]">
+            <PortfolioDesigner
+              symbols={multiSymbols}
+              weights={customWeights}
+              frequency={customFrequency}
+              transactionCostBps={customTransactionCostBps}
+              onWeightsChange={setCustomWeights}
+              onFrequencyChange={setCustomFrequency}
+              onTransactionCostChange={setCustomTransactionCostBps}
+            />
+            <PortfolioBacktestPanel
+              result={customPortfolioResult}
+              symbols={multiSymbols}
+            />
+          </div>
+        </section>
+      )}
+
       {multiSymbols.length >= 2 && (
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-          <div className="mb-4">
-            <h2 className="text-base font-medium text-neutral-200">
-              Portfolio optimisation (mean-variance)
-            </h2>
-            <p className="mt-1 text-xs text-neutral-500">
-              Long-only grid search across up to {optimisationUniverseSize} symbols. Risk-free
-              rate assumed at {formatPercentOrDash(DEFAULT_RISK_FREE_RATE_ANNUAL)} for Sharpe
-              calculations.
-            </p>
+          <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-base font-medium text-neutral-200">
+                Portfolio optimisation (mean-variance)
+              </h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                Long-only grid search across up to {optimisationUniverseSize} symbols. Risk-free
+                rate assumed at {formatPercentOrDash(DEFAULT_RISK_FREE_RATE_ANNUAL)} for Sharpe
+                calculations.
+              </p>
+            </div>
+            <ExplainPanelButton
+              title="Efficient frontier"
+              summary="Explore the efficient frontier to find the lowest-volatility and highest-Sharpe allocations within the selected universe."
+              termIds={["efficient_frontier", "min_variance_portfolio", "max_sharpe_portfolio"]}
+            />
           </div>
           {isMultiLoading ? (
             <div className="flex h-64 items-center justify-center text-sm text-neutral-500">
@@ -3041,6 +3394,64 @@ export function StockDashboard(): JSX.Element {
         </section>
       )}
 
+      {strategyIndicatorSeries && priceSeries.length > 0 && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+            <div>
+              <h2 className="text-base font-medium text-neutral-200">
+                Strategy Lab (config-driven)
+              </h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                Prototype new ideas by editing JSON configs. Indicators available: price, MA windows {STRATEGY_MA_WINDOWS.join(", ")} and RSI period 14.
+              </p>
+            </div>
+            <span className="text-xs text-neutral-500">
+              {symbol}
+            </span>
+          </div>
+          <StrategyLab
+            symbol={symbol}
+            priceSeries={priceSeries}
+            indicatorSeries={strategyIndicatorSeries}
+          />
+        </section>
+      )}
+
+      {priceSeries.length > 0 && robustnessSurface.length > 0 && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  MA parameter robustness
+                </h2>
+                <GlossaryTooltip termId="trend-signals" />
+              </div>
+              <p className="mt-1 text-xs text-neutral-500">
+                Grid-search MA windows to inspect performance stability. Higher scores indicate stronger robustness.
+              </p>
+            </div>
+            <RobustnessControls
+              metric={robustnessMetric}
+              onMetricChange={setRobustnessMetric}
+              shortWindow={robustnessShortStart}
+              longWindow={robustnessLongStart}
+              onShortWindowChange={setRobustnessShortStart}
+              onLongWindowChange={setRobustnessLongStart}
+            />
+          </div>
+          <RobustnessHeatmap
+            points={robustnessSurface}
+            metric={robustnessMetric}
+            xLabel="Short window"
+            yLabel="Long window"
+          />
+          <p className="mt-2 text-xs text-neutral-500">
+            Avoid overfitting: prefer regions with broadly stable performance instead of isolated hotspots.
+          </p>
+        </section>
+      )}
+
       {/* Rolling Correlations Section - Only show when 2+ symbols selected */}
       {multiSymbols.length >= 2 && rollingCorrelations.length > 0 && (
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
@@ -3116,3 +3527,6 @@ const DEFAULT_MACD_SIGNAL = 9;
 const DEFAULT_MONTE_CARLO_HORIZON = 20;
 const MONTE_CARLO_HORIZON_OPTIONS = [10, 20, 60];
 const MONTE_CARLO_PATHS = 100;
+const STRATEGY_MA_WINDOWS = [10, 20, 50, 100, 200];
+const STRATEGY_RSI_PERIODS = [14];
+const STRATEGY_LONG_WINDOWS = [50, 100, 150, 200];
