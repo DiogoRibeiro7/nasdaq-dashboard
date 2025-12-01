@@ -3,6 +3,8 @@
 import type { JSX } from "react";
 import type { HigherMoments } from "@/lib/stats";
 import { formatNumber, formatPercent } from "@/lib/format";
+import { GlossaryTooltip } from "@/components/GlossaryTooltip";
+import type { GlossaryTermId } from "@/lib/glossary";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -98,41 +100,51 @@ export function RiskMetricsPanel({
     <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-3 lg:grid-cols-2 xl:grid-cols-3">
       <MetricCard
         label="Daily Mean"
+        termId="mean_daily_return"
         value={formatPercent(mean)}
         valueClass="text-neutral-200"
       />
       <MetricCard
         label="Annual Mean"
+        termId="mean_annual_return"
         value={formatPercent(meanAnnual)}
-        valueClass={meanAnnual > 0 ? "text-green-400" : meanAnnual < 0 ? "text-red-400" : "text-neutral-200"}
+        valueClass={
+          meanAnnual > 0
+            ? "text-green-400"
+            : meanAnnual < 0
+              ? "text-red-400"
+              : "text-neutral-200"
+        }
       />
       <MetricCard
         label="Daily Vol"
+        termId="volatility_daily"
         value={formatPercent(std)}
         valueClass="text-amber-400"
       />
       <MetricCard
         label="Annual Vol"
+        termId="volatility_annualised"
         value={formatPercent(stdAnnual)}
         valueClass="text-amber-400"
       />
       <MetricCard
         label="Sharpe"
+        termId="sharpe_ratio"
         value={formatNumber(sharpeRatio)}
         valueClass={getSharpeColor(sharpeRatio)}
-        tooltip="Annualized risk-adjusted return"
       />
       <MetricCard
         label="Skewness"
+        termId="skewness"
         value={formatNumber(skewness)}
         valueClass={getSkewnessColor(skewness)}
-        tooltip="<0 = left tail risk"
       />
       <MetricCard
         label="Kurtosis"
+        termId="kurtosis"
         value={formatNumber(kurtosis)}
         valueClass={getKurtosisColor(kurtosis)}
-        tooltip=">0 = fat tails"
       />
     </div>
   );
@@ -149,7 +161,7 @@ type MetricCardProps = {
   label: string;
   value: string;
   valueClass?: string;
-  tooltip?: string;
+  termId: GlossaryTermId;
 };
 
 /**
@@ -159,14 +171,14 @@ function MetricCard({
   label,
   value,
   valueClass = "text-neutral-100",
-  tooltip,
+  termId,
 }: MetricCardProps): JSX.Element {
   return (
-    <div
-      className="rounded-lg border border-neutral-700/50 bg-neutral-800/30 p-2 transition-colors hover:border-neutral-600/50 hover:bg-neutral-800/50"
-      title={tooltip}
-    >
-      <div className="text-[10px] font-medium text-neutral-500">{label}</div>
+    <div className="rounded-lg border border-neutral-700/50 bg-neutral-800/30 p-2 transition-colors hover:border-neutral-600/50 hover:bg-neutral-800/50">
+      <div className="flex items-center gap-1 text-[10px] font-medium text-neutral-500">
+        {label}
+        <GlossaryTooltip termId={termId} />
+      </div>
       <div className={`mt-0.5 text-sm font-semibold tabular-nums ${valueClass}`}>
         {value}
       </div>

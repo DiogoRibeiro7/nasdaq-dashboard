@@ -1,6 +1,7 @@
 "use client";
 
 import type { JSX } from "react";
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { StockSelector } from "@/components/StockSelector";
 import { StockChart } from "@/components/StockChart";
@@ -82,6 +83,9 @@ import { ForecastChart } from "@/components/ForecastChart";
 import { VarEsPanel } from "@/components/VarEsPanel";
 import { PcaExplainedVarianceChart } from "@/components/PcaExplainedVarianceChart";
 import { PcaLoadingsTable } from "@/components/PcaLoadingsTable";
+import { ScenarioPanel } from "@/components/ScenarioPanel";
+import { MonteCarloChart } from "@/components/MonteCarloChart";
+import { FactorLoadingsPanel } from "@/components/FactorLoadingsPanel";
 import type {
   ChartPoint,
   FetchState,
@@ -111,6 +115,17 @@ import {
   generateRsiBandSignals,
 } from "@/lib/analytics/backtest";
 import { computeVarEs } from "@/lib/analytics/risk";
+import {
+  buildFactorSeriesFromReturns,
+  runFactorRegression,
+  type FactorDefinition,
+  type FactorSeries,
+} from "@/lib/analytics/factors";
+import {
+  applyShockScenario,
+  simulateMonteCarloPaths,
+  type ShockScenario,
+} from "@/lib/analytics/scenario";
 import {
   computeEfficientFrontier,
   findMaxSharpePortfolio,
@@ -170,6 +185,39 @@ function computePointSharpe(
   }
   return (point.expectedReturn - riskFreeRate) / point.volatility;
 }
+
+function computeDailyStats(
+  returns: DatedReturn[],
+): { mean: number; std: number } | null {
+  if (returns.length < 2) {
+    return null;
+  }
+  const values = returns.map((point) => point.r).filter((value) =>
+    Number.isFinite(value),
+  );
+  if (values.length < 2) {
+    return null;
+  }
+  const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+  const variance =
+    values.reduce((sum, value) => sum + (value - mean) ** 2, 0) /
+    (values.length - 1);
+  const std = variance > 0 ? Math.sqrt(variance) : 0;
+  return { mean, std };
+}
+
+const FACTOR_CONFIGS: FactorDefinition[] = [
+  { symbol: DEFAULT_BENCHMARK_SYMBOL, name: "Market (QQQ)" },
+  { symbol: "AAPL", name: "Tech growth (AAPL)" },
+  { symbol: "PEP", name: "Defensive (PEP)" },
+];
+
+const SHOCK_SCENARIOS: ShockScenario[] = [
+  { name: "-5% one-day shock", returnShock: -0.05, volMultiplier: 1.5 },
+  { name: "-10% stress selloff", returnShock: -0.1, volMultiplier: 2 },
+  { name: "+5% relief rally", returnShock: 0.05, volMultiplier: 0.8 },
+  { name: "Flat day", returnShock: 0, volMultiplier: 1 },
+];
 
 function sanitizeShortWindow(value: number, currentLong: number): number {
   if (!Number.isFinite(value)) return DEFAULT_SHORT_WINDOW;
@@ -420,6 +468,10 @@ export function StockDashboard(): JSX.Element {
   const [benchmarkState, setBenchmarkState] =
     useState<FetchState<StockApiResponse>>({ status: "idle" });
 
+  const [factorState, setFactorState] = useState<
+    FetchState<Record<string, StockApiResponse>>
+  >({ status: "idle" });
+
   // Advanced analytics state
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [analyticsTab, setAnalyticsTab] = useState<
@@ -457,6 +509,17 @@ export function StockDashboard(): JSX.Element {
   const [forecastHorizon, setForecastHorizon] = useState(10);
   const [tailConfidence, setTailConfidence] = useState(0.95);
   const [tailHorizon, setTailHorizon] = useState(1);
+  const [stockScenarioName, setStockScenarioName] = useState(
+    SHOCK_SCENARIOS[0].name,
+  );
+  const [portfolioScenarioName, setPortfolioScenarioName] = useState(
+    SHOCK_SCENARIOS[0].name,
+  );
+  const [stockMonteCarloHorizon, setStockMonteCarloHorizon] = useState(
+    DEFAULT_MONTE_CARLO_HORIZON,
+  );
+  const [portfolioMonteCarloHorizon, setPortfolioMonteCarloHorizon] =
+    useState(DEFAULT_MONTE_CARLO_HORIZON);
 
   // ───────────────────────────────────────────────────────────────────────────
   // Data Fetching
@@ -591,6 +654,57 @@ export function StockDashboard(): JSX.Element {
     };
   }, []);
 
+  useEffect(() => {
+    const extraSymbols = FACTOR_CONFIGS.filter(
+      (config) => config.symbol !== DEFAULT_BENCHMARK_SYMBOL,
+    ).map((config) => config.symbol);
+
+    if (extraSymbols.length === 0) {
+      setFactorState({ status: "success", data: {} });
+      return;
+    }
+
+    let cancelled = false;
+
+    async function loadFactorProxies(): Promise<void> {
+      setFactorState({ status: "loading" });
+      try {
+        const responses = await Promise.all(
+          extraSymbols.map(async (sym) => {
+            const response = await fetch(`/api/stocks/${sym}`);
+            if (!response.ok) {
+              const errorMessage = await extractErrorMessage(response);
+              throw new Error(errorMessage);
+            }
+            const data = (await response.json()) as StockApiResponse;
+            return [sym, data] as const;
+          }),
+        );
+
+        if (cancelled) return;
+
+        const dataMap: Record<string, StockApiResponse> = {};
+        for (const [sym, data] of responses) {
+          dataMap[sym] = data;
+        }
+        setFactorState({ status: "success", data: dataMap });
+      } catch (err: unknown) {
+        if (cancelled) return;
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Unexpected error while fetching factor proxies";
+        setFactorState({ status: "error", error: message });
+      }
+    }
+
+    void loadFactorProxies();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ───────────────────────────────────────────────────────────────────────────
   // Derived Data
   // ───────────────────────────────────────────────────────────────────────────
@@ -674,6 +788,12 @@ export function StockDashboard(): JSX.Element {
       sharpeRatio: computeSharpeRatio(dailyReturns),
     };
   }, [rangeSeries]);
+
+  const assetReturns = returnDistribution.dailyReturns;
+  const assetReturnStats = useMemo(
+    () => computeDailyStats(assetReturns),
+    [assetReturns],
+  );
 
   const dailyReturnCount = returnDistribution.dailyReturns.length;
 
@@ -1104,6 +1224,10 @@ export function StockDashboard(): JSX.Element {
     const metrics = computePortfolioMetrics(series);
     return { series, metrics };
   }, [multiState, multiSymbols, range]);
+  const portfolioCurrentEquity =
+    portfolioData.series.length > 0
+      ? portfolioData.series[portfolioData.series.length - 1].close
+      : 1;
 
   const portfolioLogReturns = useMemo(() => {
     if (portfolioData.series.length < 2) {
@@ -1127,6 +1251,96 @@ export function StockDashboard(): JSX.Element {
     () => computeVarEs(portfolioLogReturns, tailHorizon, tailConfidence),
     [portfolioLogReturns, tailHorizon, tailConfidence],
   );
+  const portfolioReturnStats = useMemo(
+    () => computeDailyStats(portfolioLogReturns),
+    [portfolioLogReturns],
+  );
+
+  const factorSeriesData = useMemo(() => {
+    if (
+      benchmarkState.status !== "success" ||
+      factorState.status !== "success"
+    ) {
+      return { series: [] as FactorSeries, factorNames: [] as string[] };
+    }
+
+    const returnsBySymbol: Record<string, DatedReturn[]> = {};
+
+    for (const config of FACTOR_CONFIGS) {
+      let sourceSeries: StockTimeSeriesPoint[] | undefined;
+      if (config.symbol === DEFAULT_BENCHMARK_SYMBOL) {
+        sourceSeries = benchmarkState.data.series;
+      } else {
+        sourceSeries = factorState.data?.[config.symbol]?.series;
+      }
+
+      if (!sourceSeries) {
+        return { series: [], factorNames: [] as string[] };
+      }
+
+      const filtered = filterByRange(sourceSeries, range);
+      const returns = getDailyLogReturns(filtered);
+      if (returns.length === 0) {
+        return { series: [], factorNames: [] as string[] };
+      }
+      returnsBySymbol[config.symbol] = returns;
+    }
+
+    return buildFactorSeriesFromReturns(FACTOR_CONFIGS, returnsBySymbol);
+  }, [benchmarkState, factorState, range]);
+
+  const factorRegressionResult = useMemo(() => {
+    if (assetReturns.length === 0 || factorSeriesData.series.length === 0) {
+      return null;
+    }
+    return runFactorRegression(assetReturns, factorSeriesData.series, {
+      symbol,
+    });
+  }, [assetReturns, factorSeriesData, symbol]);
+
+  const factorNames = factorSeriesData.factorNames;
+
+  const stockScenario = useMemo(
+    () => SHOCK_SCENARIOS.find((scenario) => scenario.name === stockScenarioName),
+    [stockScenarioName],
+  );
+  const portfolioScenario = useMemo(
+    () =>
+      SHOCK_SCENARIOS.find(
+        (scenario) => scenario.name === portfolioScenarioName,
+      ),
+    [portfolioScenarioName],
+  );
+
+  const stockMonteCarloResult = useMemo(() => {
+    if (!assetReturnStats || !stockScenario) {
+      return null;
+    }
+    const volMultiplier = stockScenario.volMultiplier ?? 1;
+    const vol = assetReturnStats.std * volMultiplier;
+    return simulateMonteCarloPaths(
+      1,
+      assetReturnStats.mean,
+      vol,
+      stockMonteCarloHorizon,
+      MONTE_CARLO_PATHS,
+    );
+  }, [assetReturnStats, stockScenario, stockMonteCarloHorizon]);
+
+  const portfolioMonteCarloResult = useMemo(() => {
+    if (!portfolioReturnStats || !portfolioScenario) {
+      return null;
+    }
+    const volMultiplier = portfolioScenario.volMultiplier ?? 1;
+    const vol = portfolioReturnStats.std * volMultiplier;
+    return simulateMonteCarloPaths(
+      1,
+      portfolioReturnStats.mean,
+      vol,
+      portfolioMonteCarloHorizon,
+      MONTE_CARLO_PATHS,
+    );
+  }, [portfolioReturnStats, portfolioScenario, portfolioMonteCarloHorizon]);
 
   const optimisationInput = useMemo<OptimisationInputs | null>(() => {
     if (multiState.status !== "success" || multiSymbols.length < 2) {
@@ -1268,6 +1482,9 @@ export function StockDashboard(): JSX.Element {
   const isMultiError = multiState.status === "error";
   const isBenchmarkLoading = benchmarkState.status === "loading";
   const isBenchmarkError = benchmarkState.status === "error";
+  const isFactorLoading =
+    factorState.status === "loading" || isBenchmarkLoading || isSingleLoading;
+  const isFactorError = factorState.status === "error";
   const assetDisplayName = getSymbolDisplayName(symbol);
   const benchmarkDisplayName = getSymbolDisplayName(DEFAULT_BENCHMARK_SYMBOL);
 
@@ -1452,9 +1669,35 @@ export function StockDashboard(): JSX.Element {
             >
               Download CSV (daily metrics)
             </button>
+            <Link
+              href="/glossary"
+              className="rounded-lg border border-sky-600/40 bg-transparent px-3 py-1.5 text-xs font-medium text-sky-300 transition-colors hover:border-sky-400 hover:text-sky-200"
+            >
+              Glossary & explainers
+            </Link>
           </div>
         </div>
       </header>
+
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4 text-sm text-neutral-300">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2 text-neutral-100">
+              Inline explainability
+              <GlossaryTooltip termId="volatility_annualised" />
+            </div>
+            <p className="text-xs text-neutral-400">
+              Metrics that display the “i” icon include short definitions. Open the glossary for deeper explanations and formulas.
+            </p>
+          </div>
+          <Link
+            href="/glossary"
+            className="inline-flex items-center text-xs font-medium text-sky-300 hover:text-sky-200"
+          >
+            Learn more →
+          </Link>
+        </div>
+      </section>
 
       {/* Loading indicator for single stock */}
       {isSingleLoading && (
@@ -1487,7 +1730,7 @@ export function StockDashboard(): JSX.Element {
                     ? `${singleState.data.symbol} — Price History`
                     : "Price History"}
                 </h2>
-                <GlossaryTooltip entryId="price-chart" />
+                <GlossaryTooltip termId="price-chart" />
               </div>
               <p className="mt-1 text-xs text-neutral-500">
                 Markers highlight gap opens and abnormal volume within the selected range.
@@ -1536,7 +1779,7 @@ export function StockDashboard(): JSX.Element {
                 <span>
                   {events.gaps.length} gaps · {events.volumeSpikes.length} volume spikes
                 </span>
-                <GlossaryTooltip entryId="event-detection" />
+                <GlossaryTooltip termId="event-detection" />
               </div>
             </div>
           </div>
@@ -1562,7 +1805,7 @@ export function StockDashboard(): JSX.Element {
             <h2 className="text-base font-medium text-neutral-200">
               Risk &amp; Return
             </h2>
-            <GlossaryTooltip entryId="risk-cards" />
+            <GlossaryTooltip termId="risk-cards" />
           </div>
           {stats ? (
             <StatsCards stats={stats} symbol={symbol} />
@@ -1581,7 +1824,7 @@ export function StockDashboard(): JSX.Element {
             <h2 className="text-base font-medium text-neutral-200">
               Trend signals (Moving Averages)
             </h2>
-            <GlossaryTooltip entryId="trend-signals" />
+            <GlossaryTooltip termId="trend-signals" />
           </div>
           <p className="mt-1 text-xs text-neutral-500">
             Golden cross = short MA crossing above long MA (bullish). Death cross = short MA crossing below long MA (bearish).
@@ -1752,7 +1995,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Regime Classification
               </h2>
-              <GlossaryTooltip entryId="regime-classification" />
+              <GlossaryTooltip termId="regime-classification" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Combines moving averages, RSI, and volatility to highlight daily market regimes.
@@ -1818,7 +2061,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Momentum &amp; Oscillators
               </h2>
-              <GlossaryTooltip entryId="momentum" />
+              <GlossaryTooltip termId="momentum" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               RSI highlights overbought (&gt;70) / oversold (&lt;30). MACD shows momentum shifts (MACD vs signal).
@@ -1914,7 +2157,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Benchmark Analytics
               </h2>
-              <GlossaryTooltip entryId="capm" />
+              <GlossaryTooltip termId="capm" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               CAPM regression vs {benchmarkDisplayName} ({DEFAULT_BENCHMARK_SYMBOL}).
@@ -1947,6 +2190,108 @@ export function StockDashboard(): JSX.Element {
         )}
       </section>
 
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Scenario &amp; Monte Carlo (Single Stock)
+              </h2>
+              <GlossaryTooltip termId="scenario_analysis" />
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Quick one-day shocks plus geometric Brownian motion paths using recent daily returns.
+            </p>
+          </div>
+          <span className="text-xs text-neutral-500">
+            {assetReturnStats ? `${assetReturns.length} aligned days` : "Need more data"}
+          </span>
+        </div>
+        {assetReturnStats ? (
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,260px),1fr]">
+            <ScenarioPanel
+              scenarios={SHOCK_SCENARIOS}
+              selectedScenarioName={stockScenario?.name ?? SHOCK_SCENARIOS[0].name}
+              onScenarioChange={(scenario) => setStockScenarioName(scenario.name)}
+              currentEquity={1}
+            />
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-neutral-400">
+                  Monte Carlo horizon
+                </div>
+                <select
+                  className="rounded-lg border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-100 focus:border-neutral-500 focus:outline-none"
+                  value={stockMonteCarloHorizon}
+                  onChange={(event) =>
+                    setStockMonteCarloHorizon(Number(event.target.value))
+                  }
+                >
+                  {MONTE_CARLO_HORIZON_OPTIONS.map((option) => (
+                    <option key={option} value={option}>
+                      {option} days
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <MonteCarloChart result={stockMonteCarloResult} />
+            </div>
+          </div>
+        ) : (
+          <div className="flex h-28 items-center justify-center text-sm text-neutral-500">
+            Need at least two aligned daily returns to run the scenario engine.
+          </div>
+        )}
+      </section>
+
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-medium text-neutral-200">
+                Factor exposures
+              </h2>
+              <GlossaryTooltip termId="factor_exposures" />
+            </div>
+            <p className="mt-1 text-xs text-neutral-500">
+              Daily log returns regressed on proxy factors: Market (QQQ), Tech growth (AAPL), Defensive (PEP).
+            </p>
+          </div>
+          <span className="text-xs text-neutral-500">
+            Using {range === "MAX" ? "full history" : range} window
+          </span>
+        </div>
+        {isFactorLoading ? (
+          <div className="flex h-28 items-center justify-center text-sm text-neutral-500">
+            Running factor regression…
+          </div>
+        ) : isFactorError ? (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
+            <p className="font-semibold">Unable to load factor proxies</p>
+            <p className="mt-1 text-xs text-red-300">{factorState.error}</p>
+          </div>
+        ) : isBenchmarkError ? (
+          <div className="rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
+            <p className="font-semibold">Benchmark data unavailable</p>
+            <p className="mt-1 text-xs text-red-300">
+              CAPM benchmark is required before running the factor model.
+            </p>
+          </div>
+        ) : singleState.status !== "success" ||
+          benchmarkState.status !== "success" ||
+          factorState.status !== "success" ? (
+          <div className="flex h-28 items-center justify-center text-sm text-neutral-500">
+            Select a symbol to view factor loadings.
+          </div>
+        ) : factorRegressionResult && factorNames.length > 0 ? (
+          <FactorLoadingsPanel result={factorRegressionResult} factorNames={factorNames} />
+        ) : (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4 text-sm text-neutral-400">
+            Need overlapping history between the asset and factor proxies to estimate betas.
+          </div>
+        )}
+      </section>
+
       {/* Return Distribution & Risk Profile */}
       <div className="grid gap-6 lg:grid-cols-5">
         {/* Histogram - takes 3/5 on large screens */}
@@ -1956,7 +2301,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Return Distribution
               </h2>
-              <GlossaryTooltip entryId="return-distribution" />
+              <GlossaryTooltip termId="return-distribution" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Histogram of daily log returns over selected range.
@@ -1978,7 +2323,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Risk Profile
               </h2>
-              <GlossaryTooltip entryId="risk-profile" />
+              <GlossaryTooltip termId="risk-profile" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Distribution moments and risk-adjusted metrics.
@@ -2008,7 +2353,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Risk tails (VaR &amp; ES)
               </h2>
-              <GlossaryTooltip entryId="risk-tail" />
+              <GlossaryTooltip termId="risk-tail" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Value-at-Risk and Expected Shortfall estimates for the selected stock and the equal-weight portfolio.
@@ -2058,7 +2403,7 @@ export function StockDashboard(): JSX.Element {
             <h2 className="text-base font-medium text-neutral-200">
               Serial Dependence &amp; Volatility Clustering
             </h2>
-            <GlossaryTooltip entryId="serial-dependence" />
+            <GlossaryTooltip termId="serial-dependence" />
           </div>
           <p className="mt-1 text-xs text-neutral-500">
             Autocorrelation diagnostics on daily log returns (lags up to 20).
@@ -2110,7 +2455,7 @@ export function StockDashboard(): JSX.Element {
             <h2 className="text-base font-medium text-neutral-200">
               Seasonality &amp; Calendar Effects
             </h2>
-            <GlossaryTooltip entryId="seasonality" />
+            <GlossaryTooltip termId="seasonality" />
           </div>
           <p className="mt-1 text-xs text-neutral-500">
             Average daily log returns by day of week and month (selected range).
@@ -2152,7 +2497,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Screener &amp; Ranking
               </h2>
-              <GlossaryTooltip entryId="screener" />
+              <GlossaryTooltip termId="screener" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Rank our NASDAQ universe ({NASDAQ_STOCKS.length} tickers) by momentum, volatility, and Sharpe.
@@ -2222,7 +2567,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Risk model (PCA)
               </h2>
-              <GlossaryTooltip entryId="risk-model" />
+              <GlossaryTooltip termId="risk-model" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Principal-component view of cross-sectional returns for the NASDAQ universe.
@@ -2257,7 +2602,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Price Forecast (baseline models)
               </h2>
-              <GlossaryTooltip entryId="forecast" />
+              <GlossaryTooltip termId="forecast" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Simple projections based on naive, rolling mean, or EWMA assumptions. Not investment advice.
@@ -2307,7 +2652,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Advanced Time-Series Analytics
               </h2>
-              <GlossaryTooltip entryId="advanced-analytics" />
+              <GlossaryTooltip termId="advanced-analytics" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Rolling volatility, returns, and drawdown analysis.
@@ -2425,7 +2770,7 @@ export function StockDashboard(): JSX.Element {
                 <h2 className="text-base font-medium text-neutral-200">
                   Multi-Stock Comparison
                 </h2>
-                <GlossaryTooltip entryId="multi-comparison" />
+                <GlossaryTooltip termId="multi-comparison" />
               </div>
               <p className="mt-1 text-xs text-neutral-500">
                 Normalized to 1 at range start for relative performance.
@@ -2464,7 +2809,7 @@ export function StockDashboard(): JSX.Element {
               <h2 className="text-base font-medium text-neutral-200">
                 Correlation Matrix
               </h2>
-              <GlossaryTooltip entryId="correlation-matrix" />
+              <GlossaryTooltip termId="correlation-matrix" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
               Daily log-return correlations between selected symbols.
@@ -2500,7 +2845,7 @@ export function StockDashboard(): JSX.Element {
                 <h2 className="text-base font-medium text-neutral-200">
                   Portfolio (equal-weight)
                 </h2>
-                <GlossaryTooltip entryId="equal-weight-portfolio" />
+                <GlossaryTooltip termId="equal-weight-portfolio" />
               </div>
               <p className="mt-1 text-xs text-neutral-500">
                 Normalized to 1 on the first common date of {multiSymbols.join(", ")}.
@@ -2519,6 +2864,68 @@ export function StockDashboard(): JSX.Element {
           <div className="mt-4">
             <PortfolioChart data={portfolioData.series} />
           </div>
+        </section>
+      )}
+
+      {portfolioData.series.length > 0 && (
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-medium text-neutral-200">
+                  Scenario &amp; Monte Carlo (Equal-weight portfolio)
+                </h2>
+                <GlossaryTooltip termId="scenario_analysis" />
+              </div>
+              <p className="mt-1 text-xs text-neutral-500">
+                Stress shocks applied to the final portfolio value plus simulated paths based on historical returns.
+              </p>
+            </div>
+            <span className="text-xs text-neutral-500">
+              {portfolioReturnStats
+                ? `${portfolioLogReturns.length} aligned days`
+                : "Need more data"}
+            </span>
+          </div>
+          {portfolioReturnStats ? (
+            <div className="grid gap-4 lg:grid-cols-[minmax(0,260px),1fr]">
+              <ScenarioPanel
+                scenarios={SHOCK_SCENARIOS}
+                selectedScenarioName={
+                  portfolioScenario?.name ?? SHOCK_SCENARIOS[0].name
+                }
+                onScenarioChange={(scenario) =>
+                  setPortfolioScenarioName(scenario.name)
+                }
+                currentEquity={portfolioCurrentEquity}
+              />
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs text-neutral-400">
+                    Monte Carlo horizon
+                  </div>
+                  <select
+                    className="rounded-lg border border-neutral-700 bg-neutral-950 px-2 py-1 text-xs text-neutral-100 focus:border-neutral-500 focus:outline-none"
+                    value={portfolioMonteCarloHorizon}
+                    onChange={(event) =>
+                      setPortfolioMonteCarloHorizon(Number(event.target.value))
+                    }
+                  >
+                    {MONTE_CARLO_HORIZON_OPTIONS.map((option) => (
+                      <option key={option} value={option}>
+                        {option} days
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <MonteCarloChart result={portfolioMonteCarloResult} />
+              </div>
+            </div>
+          ) : (
+            <div className="flex h-28 items-center justify-center text-sm text-neutral-500">
+              Need at least two aligned portfolio returns to run simulations.
+            </div>
+          )}
         </section>
       )}
 
@@ -2644,7 +3051,7 @@ export function StockDashboard(): JSX.Element {
                   <h2 className="text-base font-medium text-neutral-200">
                     Rolling Correlations (vs {multiSymbols[0]})
                   </h2>
-                  <GlossaryTooltip entryId="rolling-correlations" />
+                  <GlossaryTooltip termId="rolling-correlations" />
                 </div>
                 <p className="mt-1 text-xs text-neutral-500">
                   {correlationWindow}-day rolling correlation coefficients over time. Reference ticker: {multiSymbols[0]}
@@ -2706,3 +3113,6 @@ const DEFAULT_RSI_PERIOD = 14;
 const DEFAULT_MACD_FAST = 12;
 const DEFAULT_MACD_SLOW = 26;
 const DEFAULT_MACD_SIGNAL = 9;
+const DEFAULT_MONTE_CARLO_HORIZON = 20;
+const MONTE_CARLO_HORIZON_OPTIONS = [10, 20, 60];
+const MONTE_CARLO_PATHS = 100;

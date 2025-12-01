@@ -3,6 +3,7 @@
 import type { JSX } from "react";
 import type { VarEsResult } from "@/lib/analytics/risk";
 import { formatPercent } from "@/lib/format";
+import { GlossaryTooltip } from "@/components/GlossaryTooltip";
 
 export type VarEsPanelProps = {
   label: string;
@@ -49,8 +50,18 @@ export function VarEsPanel({
         <thead className="text-neutral-400">
           <tr>
             <th className="px-2 py-1 text-left font-medium">Method</th>
-            <th className="px-2 py-1 text-right font-medium">VaR</th>
-            <th className="px-2 py-1 text-right font-medium">Expected Shortfall</th>
+            <th className="px-2 py-1 text-right font-medium">
+              <span className="flex items-center justify-end gap-1">
+                VaR
+                <GlossaryTooltip termId="value_at_risk" />
+              </span>
+            </th>
+            <th className="px-2 py-1 text-right font-medium">
+              <span className="flex items-center justify-end gap-1">
+                Expected Shortfall
+                <GlossaryTooltip termId="expected_shortfall" />
+              </span>
+            </th>
           </tr>
         </thead>
         <tbody>

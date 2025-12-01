@@ -1,6 +1,7 @@
 import type { JSX } from "react";
 import type { CapmStats } from "@/lib/stats";
 import { formatNumber, formatPercent } from "@/lib/format";
+import { GlossaryTooltip } from "@/components/GlossaryTooltip";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -49,25 +50,33 @@ export function CapmPanel({
       {hasStats ? (
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <p className="text-xs text-neutral-500">Beta</p>
+            <p className="flex items-center gap-1 text-xs text-neutral-500">
+              Beta <GlossaryTooltip termId="beta" />
+            </p>
             <p className="text-lg font-semibold text-neutral-100">
               {formatNumber(stats.beta)}
             </p>
           </div>
           <div>
-            <p className="text-xs text-neutral-500">R²</p>
+            <p className="flex items-center gap-1 text-xs text-neutral-500">
+              R² <GlossaryTooltip termId="r_squared" />
+            </p>
             <p className="text-lg font-semibold text-neutral-100">
               {formatNumber(stats.r2)}
             </p>
           </div>
           <div>
-            <p className="text-xs text-neutral-500">Alpha (daily)</p>
+            <p className="flex items-center gap-1 text-xs text-neutral-500">
+              Alpha (daily) <GlossaryTooltip termId="alpha_daily" />
+            </p>
             <p className="text-lg font-semibold text-neutral-100">
               {formatPercent(stats.alphaDaily)}
             </p>
           </div>
           <div>
-            <p className="text-xs text-neutral-500">Alpha (annualized)</p>
+            <p className="flex items-center gap-1 text-xs text-neutral-500">
+              Alpha (annualized) <GlossaryTooltip termId="alpha_annual" />
+            </p>
             <p className="text-lg font-semibold text-neutral-100">
               {formatPercent(stats.alphaAnnual)}
             </p>

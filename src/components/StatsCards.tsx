@@ -4,6 +4,8 @@ import type { JSX } from "react";
 import type { StockStats } from "@/lib/stats";
 import { shouldShowCurrency } from "@/lib/stocks";
 import { formatCurrency, formatNumber, formatPercent } from "@/lib/format";
+import { GlossaryTooltip } from "@/components/GlossaryTooltip";
+import type { GlossaryTermId } from "@/lib/glossary";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -58,22 +60,26 @@ export function StatsCards({ stats, symbol }: StatsCardsProps): JSX.Element {
         label="Last Close"
         value={formatPrice(stats.lastClose, showCurrency)}
         valueClass="text-neutral-100"
+        termId="last_close"
       />
       <StatCard
         label="1M Return"
         value={formatPercent(stats.oneMonthReturn)}
         valueClass={getReturnColor(stats.oneMonthReturn)}
+        termId="trailing_return"
       />
       <StatCard
         label="3M Return"
         value={formatPercent(stats.threeMonthReturn)}
         valueClass={getReturnColor(stats.threeMonthReturn)}
+        termId="trailing_return"
       />
       <StatCard
         label="Volatility"
         value={formatPercent(stats.annualizedVolatility)}
         valueClass="text-amber-400"
         subtitle="Annualized"
+        termId="volatility_annualised"
       />
     </div>
   );
@@ -91,6 +97,7 @@ type StatCardProps = {
   value: string;
   valueClass?: string;
   subtitle?: string;
+  termId?: GlossaryTermId;
 };
 
 /**
@@ -101,11 +108,15 @@ function StatCard({
   value,
   valueClass = "text-neutral-100",
   subtitle,
+  termId,
 }: StatCardProps): JSX.Element {
   return (
     <div className="rounded-xl border border-neutral-700/50 bg-neutral-800/30 p-3 transition-colors hover:border-neutral-600/50 hover:bg-neutral-800/50">
-      <div className="flex items-baseline justify-between">
-        <span className="text-xs font-medium text-neutral-400">{label}</span>
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-xs font-medium text-neutral-400 flex items-center gap-1">
+          {label}
+          {termId && <GlossaryTooltip termId={termId} />}
+        </span>
         {subtitle && (
           <span className="text-[10px] text-neutral-500">{subtitle}</span>
         )}
