@@ -153,12 +153,18 @@ export function buildFactorSeriesFromReturns(
   let commonDates: Set<string> | null = null;
 
   for (const map of factorMaps) {
-    const keys = new Set(map.keys());
+    const keys = new Set<string>(map.keys());
     if (commonDates === null) {
       commonDates = keys;
-    } else {
-      commonDates = new Set([...commonDates].filter((date) => keys.has(date)));
+      continue;
     }
+    const intersection = new Set<string>();
+    for (const date of commonDates) {
+      if (keys.has(date)) {
+        intersection.add(date);
+      }
+    }
+    commonDates = intersection;
   }
 
   if (!commonDates || commonDates.size === 0) {
