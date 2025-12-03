@@ -1,3 +1,7 @@
+import { arimaForecast, getARIMADescription } from './arima';
+
+export { getARIMADescription } from './arima';
+
 export type ForecastPoint = {
   date: string;
   point: number;
@@ -5,7 +9,12 @@ export type ForecastPoint = {
   upper: number | null;
 };
 
-export type ForecastModelType = "naive" | "rolling_mean" | "ewma";
+export type ForecastResult = {
+  points: ForecastPoint[];
+  modelParams?: any;
+};
+
+export type ForecastModelType = "naive" | "rolling_mean" | "ewma" | "arima";
 
 export type ForecastOptions = {
   rollingWindow?: number;
@@ -25,6 +34,54 @@ function addDays(date: string, days: number): string {
   const month = `${base.getMonth() + 1}`.padStart(2, "0");
   const day = `${base.getDate()}`.padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+export function forecastPricesWithParams(
+  history: { date: string; close: number }[],
+  horizonDays: number,
+  model: ForecastModelType,
+  options: ForecastOptions = {},
+): ForecastResult {
+  if (history.length === 0 || horizonDays <= 0) {
+    return { points: [] };
+  }
+
+  const rollingWindow = options.rollingWindow ?? DEFAULT_ROLLING_WINDOW;
+  const ewmaLambda = options.ewmaLambda ?? DEFAULT_EWMA_LAMBDA;
+  const confidenceLevel = options.confidenceLevel ?? DEFAULT_CONFIDENCE;
+
+  const sorted = [...history].sort((a, b) =>
+    a.date.localeCompare(b.date),
+  );
+  const lastClose = sorted[sorted.length - 1].close;
+  const lastDate = sorted[sorted.length - 1].date;
+
+  const closes = sorted.map((point) => point.close);
+
+  // Handle ARIMA model separately
+  if (model === "arima") {
+    const arimaResult = arimaForecast(closes, horizonDays);
+    const forecasts: ForecastPoint[] = [];
+
+    for (let i = 0; i < horizonDays; i++) {
+      const forecastDate = addDays(lastDate, i + 1);
+      forecasts.push({
+        date: forecastDate,
+        point: arimaResult.forecast[i],
+        lower: arimaResult.lowerBound[i],
+        upper: arimaResult.upperBound[i],
+      });
+    }
+
+    return {
+      points: forecasts,
+      modelParams: arimaResult.parameters,
+    };
+  }
+
+  // Handle other models (existing logic)
+  const points = forecastPrices(history, horizonDays, model, options);
+  return { points };
 }
 
 export function forecastPrices(
@@ -48,6 +105,24 @@ export function forecastPrices(
   const lastDate = sorted[sorted.length - 1].date;
 
   const closes = sorted.map((point) => point.close);
+
+  // Handle ARIMA model separately
+  if (model === "arima") {
+    const arimaResult = arimaForecast(closes, horizonDays);
+    const forecasts: ForecastPoint[] = [];
+
+    for (let i = 0; i < horizonDays; i++) {
+      const forecastDate = addDays(lastDate, i + 1);
+      forecasts.push({
+        date: forecastDate,
+        point: arimaResult.forecast[i],
+        lower: arimaResult.lowerBound[i],
+        upper: arimaResult.upperBound[i],
+      });
+    }
+
+    return forecasts;
+  }
   const logReturns = [];
   for (let i = 1; i < closes.length; i++) {
     const prev = closes[i - 1];

@@ -2593,3 +2593,99 @@ export type PortfolioPoint = {
   date: string;
   close: number;
 };
+
+/**
+ * Compute simple returns from a price series
+ * @param prices Array of prices
+ * @returns Array of returns (as decimals, not percentages)
+ */
+export function computeReturns(prices: number[]): number[] {
+  if (prices.length < 2) return [];
+
+  const returns: number[] = [];
+  for (let i = 1; i < prices.length; i++) {
+    if (prices[i - 1] !== 0) {
+      returns.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+    }
+  }
+  return returns;
+}
+
+/**
+ * Compute correlation between two return series
+ * @param returns1 First return series
+ * @param returns2 Second return series
+ * @returns Correlation coefficient between -1 and 1
+ */
+export function computeCorrelation(returns1: number[], returns2: number[]): number {
+  if (returns1.length !== returns2.length || returns1.length === 0) {
+    return 0;
+  }
+
+  const n = returns1.length;
+  const mean1 = returns1.reduce((sum, r) => sum + r, 0) / n;
+  const mean2 = returns2.reduce((sum, r) => sum + r, 0) / n;
+
+  let cov = 0;
+  let var1 = 0;
+  let var2 = 0;
+
+  for (let i = 0; i < n; i++) {
+    const diff1 = returns1[i] - mean1;
+    const diff2 = returns2[i] - mean2;
+    cov += diff1 * diff2;
+    var1 += diff1 * diff1;
+    var2 += diff2 * diff2;
+  }
+
+  const denominator = Math.sqrt(var1 * var2);
+  return denominator === 0 ? 0 : cov / denominator;
+}
+
+/**
+ * Compute beta coefficient (systematic risk)
+ * @param stockReturns Stock return series
+ * @param marketReturns Market return series
+ * @returns Beta coefficient
+ */
+export function computeBeta(stockReturns: number[], marketReturns: number[]): number {
+  if (stockReturns.length !== marketReturns.length || stockReturns.length === 0) {
+    return 0;
+  }
+
+  const n = stockReturns.length;
+  const meanStock = stockReturns.reduce((sum, r) => sum + r, 0) / n;
+  const meanMarket = marketReturns.reduce((sum, r) => sum + r, 0) / n;
+
+  let covariance = 0;
+  let marketVariance = 0;
+
+  for (let i = 0; i < n; i++) {
+    const stockDiff = stockReturns[i] - meanStock;
+    const marketDiff = marketReturns[i] - meanMarket;
+    covariance += stockDiff * marketDiff;
+    marketVariance += marketDiff * marketDiff;
+  }
+
+  return marketVariance === 0 ? 0 : covariance / marketVariance;
+}
+
+/**
+ * Compute drawdowns from a simple price array
+ * @param prices Array of prices
+ * @returns Array of drawdown objects
+ */
+export function computeSimpleDrawdown(prices: number[]): { drawdown: number }[] {
+  if (prices.length === 0) return [];
+
+  const drawdowns: { drawdown: number }[] = [];
+  let runningMax = prices[0];
+
+  for (const price of prices) {
+    runningMax = Math.max(runningMax, price);
+    const drawdown = runningMax > 0 ? (price - runningMax) / runningMax : 0;
+    drawdowns.push({ drawdown });
+  }
+
+  return drawdowns;
+}

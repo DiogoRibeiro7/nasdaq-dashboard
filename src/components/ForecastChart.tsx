@@ -11,17 +11,21 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import type { ForecastPoint } from "@/lib/analytics/forecast";
+import type { ForecastPoint, ForecastModelType } from "@/lib/analytics/forecast";
 import { formatAxisNumber } from "@/lib/format";
 
 export type ForecastChartProps = {
   history: { date: string; close: number }[];
   forecast: ForecastPoint[];
+  model?: ForecastModelType;
+  modelParams?: any;
 };
 
 export function ForecastChart({
   history,
   forecast,
+  model,
+  modelParams,
 }: ForecastChartProps): JSX.Element {
   const chartHistory = history.slice(-120);
 
@@ -88,7 +92,17 @@ export function ForecastChart({
             labelFormatter={(label, payload) => {
               const context = payload?.[0]?.payload;
               if (context?.type === "forecast") {
-                return `${label} (forecast)`;
+                let modelInfo = `${label} (forecast)`;
+                if (model === "arima" && modelParams) {
+                  modelInfo += `\nARIMA(1,1,1): AR=${modelParams.arCoefficient?.toFixed(3) || "N/A"}, MA=${modelParams.maCoefficient?.toFixed(3) || "N/A"}`;
+                } else if (model === "ewma") {
+                  modelInfo += `\nEWMA: λ=0.2`;
+                } else if (model === "rolling_mean") {
+                  modelInfo += `\nRolling Mean: window=20`;
+                } else if (model === "naive") {
+                  modelInfo += `\nNaive (Last Value)`;
+                }
+                return modelInfo;
               }
               return label;
             }}

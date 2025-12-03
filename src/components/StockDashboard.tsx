@@ -99,6 +99,9 @@ import { RobustnessControls } from "@/components/RobustnessControls";
 import { RobustnessHeatmap } from "@/components/RobustnessHeatmap";
 import { ExplainPanelButton } from "@/components/ExplainPanelButton";
 import { FactorLoadingsPanel } from "@/components/FactorLoadingsPanel";
+import { SavedPortfoliosPanel } from "@/components/SavedPortfoliosPanel";
+import { TechnicalIndicatorsPanel } from "@/components/TechnicalIndicatorsPanel";
+import { PerformanceTable } from "@/components/PerformanceTable";
 import type {
   ChartPoint,
   FetchState,
@@ -153,6 +156,7 @@ import {
   type RebalanceFrequency,
   type TargetWeights,
 } from "@/lib/analytics/portfolio_backtest";
+import type { SavedPortfolio } from "@/lib/storage/portfolioStorage";
 import {
   computeEfficientFrontier,
   findMaxSharpePortfolio,
@@ -648,6 +652,13 @@ export function StockDashboard(): JSX.Element {
     useState<RobustnessMetric>("totalReturn");
   const [robustnessShortStart, setRobustnessShortStart] = useState(10);
   const [robustnessLongStart, setRobustnessLongStart] = useState(100);
+  const handleLoadSavedPortfolio = useCallback(
+    (portfolio: SavedPortfolio) => {
+      setMultiSelectedSymbols(portfolio.symbols);
+      setCustomWeights(portfolio.weights);
+    },
+    [],
+  );
 
   // ───────────────────────────────────────────────────────────────────────────
   // Data Fetching
@@ -1385,6 +1396,10 @@ export function StockDashboard(): JSX.Element {
       multiSymbols: availableSymbols,
     };
   }, [multiState, multiSelectedSymbols, range]);
+  const normalizedCustomWeights = useMemo(
+    () => normalizeTargetWeights(customWeights, multiSymbols),
+    [customWeights, multiSymbols],
+  );
 
   useEffect(() => {
     if (multiSymbols.length === 0) {
@@ -1453,13 +1468,8 @@ export function StockDashboard(): JSX.Element {
     if (
       multiState.status !== "success" ||
       multiSymbols.length === 0 ||
-      Object.keys(customWeights).length === 0
+      !normalizedCustomWeights
     ) {
-      return null;
-    }
-
-    const normalized = normalizeTargetWeights(customWeights, multiSymbols);
-    if (!normalized) {
       return null;
     }
 
@@ -1482,7 +1492,7 @@ export function StockDashboard(): JSX.Element {
     return backtestPortfolio({
       initialEquity: 1,
       pricesBySymbol,
-      targetWeights: normalized,
+      targetWeights: normalizedCustomWeights,
       frequency: customFrequency,
       transactionCostBps: customTransactionCostBps,
     });
@@ -1490,7 +1500,7 @@ export function StockDashboard(): JSX.Element {
     multiState,
     multiSymbols,
     range,
-    customWeights,
+    normalizedCustomWeights,
     customFrequency,
     customTransactionCostBps,
   ]);
@@ -2436,6 +2446,28 @@ export function StockDashboard(): JSX.Element {
         )}
       </section>
 
+      {/* Technical Indicators Panel */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-medium text-neutral-200">
+              Technical Indicators
+            </h2>
+            <GlossaryTooltip termId="technical_indicators" />
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            Comprehensive technical analysis with 15+ indicators including trend, momentum, and volatility metrics.
+          </p>
+        </div>
+        {rangeSeries.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Select a range with data to view technical indicators.
+          </div>
+        ) : (
+          <TechnicalIndicatorsPanel data={rangeSeries} />
+        )}
+      </section>
+
       {/* Benchmark analytics / CAPM */}
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
@@ -2704,6 +2736,45 @@ export function StockDashboard(): JSX.Element {
         </div>
       </section>
 
+      {/* Performance Comparison Table */}
+      <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="mb-4">
+          <div className="flex items-center gap-2">
+            <h2 className="text-base font-medium text-neutral-200">
+              Performance Comparison
+            </h2>
+            <GlossaryTooltip termId="performance_comparison" />
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            Compare {symbol} performance against major benchmarks across multiple time periods.
+          </p>
+        </div>
+        {rangeSeries.length === 0 ? (
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/50 p-4 text-sm text-neutral-400">
+            Select a range with data to view performance comparison.
+          </div>
+        ) : (
+          <PerformanceTable
+            stockSymbol={symbol}
+            stockData={rangeSeries}
+            benchmarkData={
+              benchmarkState.status === "success"
+                ? [
+                    {
+                      symbol: DEFAULT_BENCHMARK_SYMBOL,
+                      name: 'QQQ',
+                      data: filterByRange(benchmarkState.data.series, range).map(d => ({
+                        date: d.date,
+                        close: d.close
+                      }))
+                    }
+                  ]
+                : []
+            }
+          />
+        )}
+      </section>
+
       {/* Serial dependence & volatility clustering */}
       <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="mb-3">
@@ -2927,6 +2998,7 @@ export function StockDashboard(): JSX.Element {
                 <option value="naive">Naive</option>
                 <option value="rolling_mean">Rolling mean</option>
                 <option value="ewma">EWMA</option>
+                <option value="arima">ARIMA</option>
               </select>
             </label>
             <label className="flex items-center gap-1">
@@ -2945,7 +3017,7 @@ export function StockDashboard(): JSX.Element {
             </label>
           </div>
         </div>
-        <ForecastChart history={priceSeries} forecast={forecastPoints} />
+        <ForecastChart history={priceSeries} forecast={forecastPoints} model={forecastModel} />
       </section>
 
       {/* Advanced Time-Series Analytics - Collapsible Section */}
@@ -3145,6 +3217,14 @@ export function StockDashboard(): JSX.Element {
       </div>
 
       {/* Portfolio view */}
+      {multiSymbols.length >= 2 && (
+        <SavedPortfoliosPanel
+          currentSymbols={multiSymbols}
+          currentWeights={normalizedCustomWeights}
+          onLoadPortfolio={handleLoadSavedPortfolio}
+        />
+      )}
+
       {portfolioData.series.length > 0 && (
         <section className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
           <div className="mb-4 flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
