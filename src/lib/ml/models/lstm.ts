@@ -129,7 +129,6 @@ export interface LSTMPredictor {
   model: tf.LayersModel | null;
   scaler: StandardScaler;
   featureNames: string[];
-  readonly supportedHorizons: number[];
 
   train(data: StockData[], config?: TrainingConfig): Promise<TrainingMetrics>;
   predict(
@@ -456,7 +455,7 @@ export class LSTMPredictor implements LSTMPredictor {
 
       await fs.writeFile(modelJsonPath, JSON.stringify(payload, null, 2), "utf8");
       if (artifacts.weightData) {
-        await fs.writeFile(weightsPath, Buffer.from(artifacts.weightData));
+        await fs.writeFile(weightsPath, Buffer.from(artifacts.weightData as ArrayBuffer));
       }
 
       return {
@@ -817,11 +816,11 @@ export class LSTMPredictor implements LSTMPredictor {
   private createEarlyStoppingCallback(
     model: tf.LayersModel,
     patience: number,
-  ): tf.CustomCallbackConfig {
+  ): any {
     let best = Number.POSITIVE_INFINITY;
     let wait = 0;
     return {
-      onEpochEnd: async (_epoch, logs) => {
+      onEpochEnd: async (_epoch: number, logs: any) => {
         const valLoss = logs?.val_loss;
         if (typeof valLoss !== "number") {
           return;

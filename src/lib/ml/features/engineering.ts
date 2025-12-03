@@ -136,8 +136,8 @@ export class FeatureEngineeringPipeline {
     const rsi = computeRsi(closes, this.options.rsiPeriod);
     const bollinger = computeBollinger(
       closes,
-      this.options.bollinger.period,
-      this.options.bollinger.stdDev,
+      this.options.bollinger!.period,
+      this.options.bollinger!.stdDev,
     );
     const vwap = computeVwap(closes, highs, lows, volumes, this.options.vwapWindow);
     const obv = computeObv(closes, volumes);
