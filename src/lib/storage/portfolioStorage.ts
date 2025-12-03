@@ -8,75 +8,200 @@ export interface SavedPortfolio {
 }
 
 export class PortfolioStorage {
-  private readonly STORAGE_KEY = "stock_portfolios";
+  private readonly STORAGE_KEY = 'stock_portfolios';
+  private readonly MAX_PORTFOLIOS = 20;
 
-  private get storage(): Storage | null {
-    if (typeof window === "undefined") {
-      return null;
-    }
-    return window.localStorage;
-  }
-
-  private read(): SavedPortfolio[] {
-    const store = this.storage;
-    if (!store) return [];
-    const raw = store.getItem(this.STORAGE_KEY);
-    if (!raw) return [];
-    try {
-      const parsed = JSON.parse(raw) as SavedPortfolio[];
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-      return [];
-    } catch {
-      return [];
-    }
-  }
-
-  private write(portfolios: SavedPortfolio[]): void {
-    const store = this.storage;
-    if (!store) return;
-    store.setItem(this.STORAGE_KEY, JSON.stringify(portfolios));
-  }
-
+  /**
+   * Get all saved portfolios from localStorage
+   */
   getAllPortfolios(): SavedPortfolio[] {
-    return this.read();
-  }
-
-  savePortfolio(portfolio: SavedPortfolio): void {
-    const portfolios = this.read();
-    const index = portfolios.findIndex((item) => item.id === portfolio.id);
-    if (index >= 0) {
-      portfolios[index] = portfolio;
-    } else {
-      portfolios.push(portfolio);
+    if (typeof window === 'undefined') {
+      return [];
     }
-    this.write(portfolios);
+
+    try {
+      const stored = localStorage.getItem(this.STORAGE_KEY);
+      if (!stored) {
+        return [];
+      }
+
+      const portfolios = JSON.parse(stored) as SavedPortfolio[];
+      // Ensure the data structure is valid
+      return Array.isArray(portfolios) ? portfolios : [];
+    } catch (error) {
+      console.error('Error loading portfolios:', error);
+      return [];
+    }
   }
 
-  deletePortfolio(id: string): void {
-    const portfolios = this.read().filter((portfolio) => portfolio.id !== id);
-    this.write(portfolios);
-  }
-
-  replaceAll(portfolios: SavedPortfolio[]): void {
-    this.write(portfolios);
-  }
-
-  updatePortfolio(
-    id: string,
-    updates: Partial<SavedPortfolio>,
-  ): void {
-    const portfolios = this.read();
-    const index = portfolios.findIndex((portfolio) => portfolio.id === id);
-    if (index === -1) {
+  /**
+   * Save a new portfolio to localStorage
+   */
+  savePortfolio(portfolio: SavedPortfolio): void {
+    if (typeof window === 'undefined') {
       return;
     }
-    portfolios[index] = {
-      ...portfolios[index],
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-    this.write(portfolios);
+
+    try {
+      const existing = this.getAllPortfolios();
+
+      // Check if we've reached the maximum number of portfolios
+      if (existing.length >= this.MAX_PORTFOLIOS) {
+        throw new Error(`Maximum of ${this.MAX_PORTFOLIOS} portfolios reached. Please delete some portfolios first.`);
+      }
+
+      // Check for duplicate IDs
+      if (existing.some(p => p.id === portfolio.id)) {
+        throw new Error('Portfolio with this ID already exists');
+      }
+
+      const updated = [...existing, portfolio];
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(updated));
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('Maximum')) {
+        throw error;
+      }
+      console.error('Error saving portfolio:', error);
+      throw new Error('Failed to save portfolio');
+    }
+  }
+
+  /**
+   * Delete a portfolio by ID
+   */
+  deletePortfolio(id: string): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const existing = this.getAllPortfolios();
+      const filtered = existing.filter(p => p.id !== id);
+
+      if (filtered.length === existing.length) {
+        throw new Error('Portfolio not found');
+      }
+
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(filtered));
+    } catch (error) {
+      console.error('Error deleting portfolio:', error);
+      throw new Error('Failed to delete portfolio');
+    }
+  }
+
+  /**
+   * Update an existing portfolio
+   */
+  updatePortfolio(id: string, updates: Partial<Omit<SavedPortfolio, 'id' | 'createdAt'>>): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const existing = this.getAllPortfolios();
+      const index = existing.findIndex(p => p.id === id);
+
+      if (index === -1) {
+        throw new Error('Portfolio not found');
+      }
+
+      existing[index] = {
+        ...existing[index],
+        ...updates,
+        updatedAt: new Date().toISOString()
+      };
+
+      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(existing));
+    } catch (error) {
+      console.error('Error updating portfolio:', error);
+      throw new Error('Failed to update portfolio');
+    }
+  }
+
+  /**
+   * Export all portfolios as JSON string
+   */
+  exportPortfolios(): string {
+    const portfolios = this.getAllPortfolios();
+    return JSON.stringify(portfolios, null, 2);
+  }
+
+  /**
+   * Import portfolios from JSON string
+   */
+  importPortfolios(jsonString: string, replace: boolean = false): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      const imported = JSON.parse(jsonString) as SavedPortfolio[];
+
+      if (!Array.isArray(imported)) {
+        throw new Error('Invalid portfolio data format');
+      }
+
+      // Validate each portfolio
+      for (const portfolio of imported) {
+        if (!portfolio.id || !portfolio.name || !Array.isArray(portfolio.symbols)) {
+          throw new Error('Invalid portfolio structure');
+        }
+      }
+
+      if (replace) {
+        // Replace all existing portfolios
+        if (imported.length > this.MAX_PORTFOLIOS) {
+          throw new Error(`Cannot import more than ${this.MAX_PORTFOLIOS} portfolios`);
+        }
+        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(imported));
+      } else {
+        // Merge with existing portfolios
+        const existing = this.getAllPortfolios();
+        const existingIds = new Set(existing.map(p => p.id));
+
+        // Filter out duplicates and add new ones
+        const newPortfolios = imported.filter(p => !existingIds.has(p.id));
+        const merged = [...existing, ...newPortfolios];
+
+        if (merged.length > this.MAX_PORTFOLIOS) {
+          throw new Error(`Importing would exceed maximum of ${this.MAX_PORTFOLIOS} portfolios`);
+        }
+
+        localStorage.setItem(this.STORAGE_KEY, JSON.stringify(merged));
+      }
+    } catch (error) {
+      console.error('Error importing portfolios:', error);
+      if (error instanceof Error) {
+        throw error;
+      }
+      throw new Error('Failed to import portfolios');
+    }
+  }
+
+  /**
+   * Clear all portfolios
+   */
+  clearAllPortfolios(): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    try {
+      localStorage.removeItem(this.STORAGE_KEY);
+    } catch (error) {
+      console.error('Error clearing portfolios:', error);
+      throw new Error('Failed to clear portfolios');
+    }
+  }
+
+  /**
+   * Get a single portfolio by ID
+   */
+  getPortfolioById(id: string): SavedPortfolio | null {
+    const portfolios = this.getAllPortfolios();
+    return portfolios.find(p => p.id === id) || null;
   }
 }
+
+// Export a singleton instance
+export const portfolioStorage = new PortfolioStorage();

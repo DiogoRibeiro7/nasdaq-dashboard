@@ -5,6 +5,7 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Legend,
   Line,
   ResponsiveContainer,
   Tooltip,
@@ -27,8 +28,10 @@ export function ForecastChart({
   model,
   modelParams,
 }: ForecastChartProps): JSX.Element {
-  const chartHistory = history.slice(-120);
+  // Show last 60 days of history for better context
+  const chartHistory = history.slice(-60);
 
+  // Create history data points
   const historyData = chartHistory.map((point) => ({
     date: point.date,
     actual: point.close,
@@ -38,6 +41,18 @@ export function ForecastChart({
     type: "history",
   }));
 
+  // Add connection point (last historical value also as first forecast point for continuity)
+  const lastHistoricalPoint = chartHistory[chartHistory.length - 1];
+  const connectionPoint = lastHistoricalPoint ? {
+    date: lastHistoricalPoint.date,
+    actual: lastHistoricalPoint.close,
+    forecast: lastHistoricalPoint.close,
+    lower: lastHistoricalPoint.close,
+    upper: lastHistoricalPoint.close,
+    type: "connection",
+  } : null;
+
+  // Create forecast data points
   const forecastData = forecast.map((point) => ({
     date: point.date,
     actual: null,
@@ -47,7 +62,10 @@ export function ForecastChart({
     type: "forecast",
   }));
 
-  const combined = [...historyData, ...forecastData];
+  // Combine all data points
+  const combined = connectionPoint
+    ? [...historyData.slice(0, -1), connectionPoint, ...forecastData]
+    : [...historyData, ...forecastData];
 
   if (combined.length === 0) {
     return (
@@ -57,18 +75,34 @@ export function ForecastChart({
     );
   }
 
+  // Calculate min/max for better Y-axis range
+  const allValues = combined.flatMap(d => [d.actual, d.forecast, d.lower, d.upper].filter(v => v !== null));
+  const minValue = Math.min(...allValues) * 0.95;
+  const maxValue = Math.max(...allValues) * 1.05;
+
   return (
     <div className="h-64 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={combined}>
+        <AreaChart data={combined} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+          <defs>
+            <linearGradient id="colorConfidence" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#38bdf8" stopOpacity={0.3} />
+              <stop offset="95%" stopColor="#38bdf8" stopOpacity={0.1} />
+            </linearGradient>
+          </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="#404040" />
           <XAxis
             dataKey="date"
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
-            minTickGap={20}
+            minTickGap={30}
             stroke="#525252"
+            tickFormatter={(value) => {
+              const date = new Date(value);
+              return `${date.getMonth() + 1}/${date.getDate()}`;
+            }}
           />
           <YAxis
+            domain={[minValue, maxValue]}
             tick={{ fontSize: 10, fill: "#a3a3a3" }}
             stroke="#525252"
             tickFormatter={(value: number) => formatAxisNumber(value)}
@@ -107,40 +141,49 @@ export function ForecastChart({
               return label;
             }}
           />
+          {/* Confidence bands - render as a filled area between upper and lower */}
           <Area
             type="monotone"
             dataKey="upper"
+            stackId="1"
             stroke="none"
-            fill="rgba(56, 189, 248, 0.2)"
+            fill="url(#colorConfidence)"
             activeDot={false}
             isAnimationActive={false}
           />
           <Area
             type="monotone"
             dataKey="lower"
+            stackId="1"
             stroke="none"
-            fill="rgba(56, 189, 248, 0.2)"
+            fill="#171717"
             activeDot={false}
             isAnimationActive={false}
           />
+
+          {/* Historical prices */}
           <Line
             type="monotone"
             dataKey="actual"
-            name="Historical Close"
+            name="Historical Price"
             stroke="#22c55e"
             strokeWidth={2}
             dot={false}
             isAnimationActive={false}
+            connectNulls={false}
           />
+
+          {/* Forecast line */}
           <Line
             type="monotone"
             dataKey="forecast"
             name="Forecast"
-            stroke="#f97316"
-            strokeDasharray="4 4"
+            stroke="#38bdf8"
             strokeWidth={2}
             dot={false}
             isAnimationActive={false}
+            connectNulls={true}
+            strokeDasharray="5 3"
           />
         </AreaChart>
       </ResponsiveContainer>

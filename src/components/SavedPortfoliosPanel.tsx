@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { JSX, ChangeEvent } from "react";
-import { PortfolioStorage, type SavedPortfolio } from "@/lib/storage/portfolioStorage";
+import { portfolioStorage, type SavedPortfolio } from "@/lib/storage/portfolioStorage";
 import type { TargetWeights } from "@/lib/analytics/portfolio_backtest";
 
 export type SavedPortfoliosPanelProps = {
@@ -19,39 +19,34 @@ export function SavedPortfoliosPanel({
   const [portfolios, setPortfolios] = useState<SavedPortfolio[]>([]);
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const storage = useMemo(() => new PortfolioStorage(), []);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    setPortfolios(storage.getAllPortfolios());
-  }, [storage]);
+    setPortfolios(portfolioStorage.getAllPortfolios());
+  }, []);
 
   if (typeof window === "undefined") {
     return null;
   }
 
   const refresh = (): void => {
-    setPortfolios(storage.getAllPortfolios());
+    setPortfolios(portfolioStorage.getAllPortfolios());
   };
 
   const handleSave = (): void => {
     setError(null);
+    setSuccessMessage(null);
+
     if (!currentWeights || currentSymbols.length === 0) {
       setError("Select at least two symbols and configure weights before saving.");
       return;
     }
-    if (currentSymbols.length > 4) {
-      setError("Saved portfolios currently support up to 4 symbols.");
-      return;
-    }
-    if (portfolios.length >= 20) {
-      setError("Maximum of 20 saved portfolios reached. Delete one before saving.");
-      return;
-    }
+
     const trimmedName = name.trim() || `Portfolio ${portfolios.length + 1}`;
-    const id =
-      globalThis.crypto?.randomUUID?.() ?? String(Date.now() + Math.random());
+    const id = globalThis.crypto?.randomUUID?.() ?? String(Date.now() + Math.random());
     const timestamp = new Date().toISOString();
+
     const portfolio: SavedPortfolio = {
       id,
       name: trimmedName,
@@ -60,71 +55,75 @@ export function SavedPortfoliosPanel({
       createdAt: timestamp,
       updatedAt: timestamp,
     };
-    storage.savePortfolio(portfolio);
-    setName("");
-    refresh();
+
+    try {
+      portfolioStorage.savePortfolio(portfolio);
+      setName("");
+      setSuccessMessage(`Portfolio "${trimmedName}" saved successfully!`);
+      refresh();
+      // Clear success message after 3 seconds
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save portfolio');
+    }
   };
 
   const handleDelete = (id: string): void => {
-    storage.deletePortfolio(id);
-    refresh();
+    try {
+      portfolioStorage.deletePortfolio(id);
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete portfolio');
+    }
   };
 
   const handleExport = (): void => {
     if (portfolios.length === 0) {
       return;
     }
-    const blob = new Blob([JSON.stringify(portfolios, null, 2)], {
-      type: "application/json;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "saved_portfolios.json";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+
+    try {
+      const jsonString = portfolioStorage.exportPortfolios();
+      const blob = new Blob([jsonString], {
+        type: "application/json;charset=utf-8",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `portfolios_export_${new Date().toISOString().split('T')[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      setSuccessMessage('Portfolios exported successfully!');
+      setTimeout(() => setSuccessMessage(null), 3000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to export portfolios');
+    }
   };
 
   const handleImport = (event: ChangeEvent<HTMLInputElement>): void => {
     const file = event.target.files?.[0];
     if (!file) return;
+
     const reader = new FileReader();
     reader.onload = () => {
       setError(null);
+      setSuccessMessage(null);
+
       try {
-        const imported = JSON.parse(reader.result as string) as SavedPortfolio[];
-        if (!Array.isArray(imported)) {
-          throw new Error("Invalid format");
-        }
-        let merged = [...portfolios];
-        for (const entry of imported) {
-          if (merged.length >= 20) break;
-          if (
-            entry &&
-            Array.isArray(entry.symbols) &&
-            typeof entry.weights === "object"
-          ) {
-            const normalized = {
-              ...entry,
-              id:
-                entry.id ??
-                globalThis.crypto?.randomUUID?.() ??
-                String(Math.random()),
-              createdAt: entry.createdAt ?? new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            };
-            merged.push(normalized);
-          }
-        }
-        storage.replaceAll(merged);
-      } catch {
-        setError("Failed to import portfolios. Ensure the JSON structure is valid.");
+        const jsonString = reader.result as string;
+        portfolioStorage.importPortfolios(jsonString, false);
+        refresh();
+        setSuccessMessage('Portfolios imported successfully!');
+        setTimeout(() => setSuccessMessage(null), 3000);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to import portfolios');
       }
-      refresh();
+
       event.target.value = "";
     };
+
     reader.readAsText(file);
   };
 
@@ -189,6 +188,11 @@ export function SavedPortfoliosPanel({
         {error && (
           <p className="mt-2 text-xs text-red-400">
             {error}
+          </p>
+        )}
+        {successMessage && (
+          <p className="mt-2 text-xs text-green-400">
+            {successMessage}
           </p>
         )}
       </div>

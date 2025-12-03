@@ -2984,7 +2984,7 @@ export function StockDashboard(): JSX.Element {
               <GlossaryTooltip termId="forecast" />
             </div>
             <p className="mt-1 text-xs text-neutral-500">
-              Simple projections based on naive, rolling mean, or EWMA assumptions. Not investment advice.
+              Statistical projections with confidence intervals. Shows last 60 days of history + forecast. Not investment advice.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-neutral-400">
@@ -3018,6 +3018,44 @@ export function StockDashboard(): JSX.Element {
           </div>
         </div>
         <ForecastChart history={priceSeries} forecast={forecastPoints} model={forecastModel} />
+
+        {/* Legend for better understanding */}
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-4 px-5 pb-3">
+          <div className="flex flex-wrap items-center gap-4 text-xs">
+            <div className="flex items-center gap-2">
+              <div className="h-0.5 w-4 bg-green-500"></div>
+              <span className="text-neutral-400">Historical Price</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-0.5 w-4 border-b-2 border-dashed border-sky-400"></div>
+              <span className="text-neutral-400">Forecast</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="h-3 w-4 bg-sky-400/20"></div>
+              <span className="text-neutral-400">95% Confidence</span>
+            </div>
+          </div>
+          {forecastModel === "arima" && (
+            <div className="text-xs text-neutral-500">
+              ARIMA(1,1,1) model with autoregressive and moving average components
+            </div>
+          )}
+          {forecastModel === "ewma" && (
+            <div className="text-xs text-neutral-500">
+              Exponentially weighted moving average with λ=0.2
+            </div>
+          )}
+          {forecastModel === "rolling_mean" && (
+            <div className="text-xs text-neutral-500">
+              Simple moving average of last 20 trading days
+            </div>
+          )}
+          {forecastModel === "naive" && (
+            <div className="text-xs text-neutral-500">
+              Naive forecast: assumes price stays at current level
+            </div>
+          )}
+        </div>
       </section>
 
       {/* Advanced Time-Series Analytics - Collapsible Section */}

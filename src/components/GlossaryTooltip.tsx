@@ -57,7 +57,7 @@ export function GlossaryTooltip({
   const tooltipContent = `${label}: ${body}`;
 
   return (
-    <div className="relative inline-block">
+    <span className="relative inline-flex">
       <button
         type="button"
         ref={ref}
@@ -84,6 +84,6 @@ export function GlossaryTooltip({
           </a>
         </div>
       )}
-    </div>
+    </span>
   );
 }
