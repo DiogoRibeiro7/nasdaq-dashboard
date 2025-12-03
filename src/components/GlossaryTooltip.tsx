@@ -32,7 +32,7 @@ export function GlossaryTooltip({
   const label = entry?.term ?? fallbackLabel;
   const body = entry?.shortDefinition ?? "See glossary for details.";
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLButtonElement>(null);
+  const ref = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -58,16 +58,23 @@ export function GlossaryTooltip({
 
   return (
     <span className="relative inline-flex">
-      <button
-        type="button"
+      <span
+        role="button"
+        tabIndex={0}
         ref={ref}
         onClick={() => setOpen((prev) => !prev)}
-        className="inline-flex h-4 w-4 items-center justify-center rounded-full border border-neutral-600/70 text-[10px] font-semibold text-neutral-200 hover:border-neutral-400 hover:text-neutral-50 focus:border-sky-400 focus:text-sky-200"
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((prev) => !prev);
+          }
+        }}
+        className="inline-flex h-4 w-4 cursor-pointer items-center justify-center rounded-full border border-neutral-600/70 text-[10px] font-semibold text-neutral-200 hover:border-neutral-400 hover:text-neutral-50 focus:border-sky-400 focus:text-sky-200"
         aria-label={tooltipContent}
         aria-expanded={open}
       >
         i
-      </button>
+      </span>
       {open && (
         <div
           className={`absolute z-30 w-60 rounded-lg border border-neutral-700 bg-neutral-950/95 p-3 text-left text-[11px] text-neutral-100 shadow-lg ${PLACEMENT_CLASSES[placement]}`}

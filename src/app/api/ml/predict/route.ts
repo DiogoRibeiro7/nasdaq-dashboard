@@ -17,7 +17,6 @@ import type {
 export const runtime = "nodejs";
 
 const MIN_SERIES_LENGTH = 120;
-const store = new PredictorStore();
 
 type ActionMode = "train" | "predict" | "backtest" | "full";
 
@@ -57,6 +56,39 @@ type VersionComparison = {
     sampleCount: number;
   };
 };
+
+class PredictorStore {
+  private readonly entries = new Map<
+    string,
+    { predictor: LSTMPredictor; history: TrainingMetrics[] }
+  >();
+
+  get(symbol: string): { predictor: LSTMPredictor; history: TrainingMetrics[] } {
+    const normalized = symbol.toUpperCase();
+    let entry = this.entries.get(normalized);
+    if (!entry) {
+      entry = {
+        predictor: new LSTMPredictor(),
+        history: [],
+      };
+      this.entries.set(normalized, entry);
+    }
+    return entry;
+  }
+
+  record(symbol: string, metrics: TrainingMetrics): void {
+    const entry = this.get(symbol);
+    entry.history.unshift(metrics);
+    entry.history = entry.history.slice(0, 5);
+  }
+
+  history(symbol: string): TrainingMetrics[] {
+    const entry = this.entries.get(symbol.toUpperCase());
+    return entry ? [...entry.history] : [];
+  }
+}
+
+const store = new PredictorStore();
 
 /**
  * POST /api/ml/predict
@@ -148,37 +180,6 @@ export async function POST(request: Request): Promise<NextResponse<ApiResponse |
 // ─────────────────────────────────────────────────────────────────────────────
 
 type ErrorResponse = { error: string };
-
-class PredictorStore {
-  private readonly entries = new Map<
-    string,
-    { predictor: LSTMPredictor; history: TrainingMetrics[] }
-  >();
-
-  get(symbol: string): { predictor: LSTMPredictor; history: TrainingMetrics[] } {
-    const normalized = symbol.toUpperCase();
-    let entry = this.entries.get(normalized);
-    if (!entry) {
-      entry = {
-        predictor: new LSTMPredictor(),
-        history: [],
-      };
-      this.entries.set(normalized, entry);
-    }
-    return entry;
-  }
-
-  record(symbol: string, metrics: TrainingMetrics): void {
-    const entry = this.get(symbol);
-    entry.history.unshift(metrics);
-    entry.history = entry.history.slice(0, 5);
-  }
-
-  history(symbol: string): TrainingMetrics[] {
-    const entry = this.entries.get(symbol.toUpperCase());
-    return entry ? [...entry.history] : [];
-  }
-}
 
 function validatePayload(payload: Partial<PredictRequest>): string | null {
   if (!payload.symbol) {
